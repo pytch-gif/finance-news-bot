@@ -22,6 +22,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run news bot
+      - name: Debug secret presence
+        run: echo "GROQ_API_KEY set? ${{ secrets.GROQ_API_KEY != '' }}"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
