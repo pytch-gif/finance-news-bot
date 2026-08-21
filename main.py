@@ -53,7 +53,7 @@ RSS_SOURCES = {
     ],
 }
 
-MAX_RAW_NEWS = 40
+MAX_RAW_NEWS = 20
 FINAL_COUNT = 6
 GROQ_MODEL = "openai/gpt-oss-20b"
 
@@ -72,7 +72,7 @@ def fetch_rss():
                     title = entry.get("title", "").strip()
                     link = entry.get("link", "").strip()
                     summary = entry.get("summary", entry.get("description", "")).strip()
-                    summary = re.sub(r"<[^>]+>", "", summary)[:250]
+                    summary = re.sub(r"<[^>]+>", "", summary)[:150]
                     if title and link:
                         all_news.append({
                             "region": region,
@@ -111,7 +111,9 @@ def call_groq(prompt, max_tokens=4000, retries=3):
                 logger.warning("Groq 暫時無法使用 (" + str(response.status_code) + ")，" + str(wait) + " 秒後重試 (" + str(attempt) + "/" + str(retries) + ")")
                 time.sleep(wait)
                 continue
-            response.raise_for_status()
+            if not response.ok:
+                logger.error("Groq API 失敗 (" + str(response.status_code) + "): " + response.text)
+                return None
             result = response.json()
             content = result["choices"][0]["message"]["content"]
             return content
@@ -265,7 +267,9 @@ def send_telegram(message):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "disable_web_page_preview": False}
     try:
         response = requests.post(url, json=payload, timeout=30)
-        response.raise_for_status()
+        if not response.ok:
+            logger.error("Telegram 發送失敗 (" + str(response.status_code) + "): " + response.text)
+            return False
         return True
     except Exception as e:
         logger.error("Telegram 發送失敗: " + str(e))
@@ -282,7 +286,7 @@ def main():
         return False
 
     daily_prompt = generate_daily_prompt(raw_news)
-    daily_content = call_groq(daily_prompt, max_tokens=4000)
+    daily_content = call_groq(daily_prompt, max_tokens=2000)
     daily_data = extract_json(daily_content)
 
     if daily_data:
