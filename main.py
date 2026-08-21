@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 每日財經新聞篩選機器人 - 雙語版 (中文 + English)
-使用 Google Gemini API (Free Tier)
+使用 Groq API (Free Tier)
 平日早上 9 點推送，週五加發本週回顧
 """
 
@@ -17,7 +17,7 @@ import requests
 # ============ 設定 ============
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-GEMINI_API_KEY = os.environ["CLAUDE_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 SG_TIME = timezone(timedelta(hours=8))
 TODAY = datetime.now(SG_TIME)
@@ -55,7 +55,7 @@ RSS_SOURCES = {
 
 MAX_RAW_NEWS = 40
 FINAL_COUNT = 6
-GEMINI_MODEL = "gemini-flash-latest"
+GROQ_MODEL = "openai/gpt-oss-20b"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -88,28 +88,40 @@ def fetch_rss():
     return all_news[:MAX_RAW_NEWS]
 
 
-def call_gemini(prompt, max_tokens=4000):
-    try:
-        response = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent",
-            headers={"Content-Type": "application/json"},
-            params={"key": GEMINI_API_KEY},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
+def call_groq(prompt, max_tokens=4000, retries=3):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + GROQ_API_KEY
+                },
+                json={
+                    "model": GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
-                    "maxOutputTokens": max_tokens
-                }
-            },
-            timeout=90
-        )
-        response.raise_for_status()
-        result = response.json()
-        content = result["candidates"][0]["content"]["parts"][0]["text"]
-        return content
-    except Exception as e:
-        logger.error("Gemini API 失敗: " + str(e))
-        return None
+                    "max_tokens": max_tokens
+                },
+                timeout=90
+            )
+            if response.status_code in (503, 429) and attempt < retries:
+                wait = 5 * attempt
+                logger.warning("Groq 暫時無法使用 (" + str(response.status_code) + ")，" + str(wait) + " 秒後重試 (" + str(attempt) + "/" + str(retries) + ")")
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+            return content
+        except Exception as e:
+            logger.error("Groq API 失敗: " + str(e))
+            if attempt < retries:
+                time.sleep(5 * attempt)
+                continue
+            return None
+    return None
 
 
 def extract_json(text):
@@ -270,7 +282,7 @@ def main():
         return False
 
     daily_prompt = generate_daily_prompt(raw_news)
-    daily_content = call_gemini(daily_prompt, max_tokens=4000)
+    daily_content = call_groq(daily_prompt, max_tokens=4000)
     daily_data = extract_json(daily_content)
 
     if daily_data:
@@ -293,7 +305,7 @@ def main():
     if WEEKDAY == 4:
         time.sleep(3)
         weekly_prompt = generate_weekly_prompt(raw_news)
-        weekly_content = call_gemini(weekly_prompt, max_tokens=2000)
+        weekly_content = call_groq(weekly_prompt, max_tokens=2000)
         weekly_data = extract_json(weekly_content)
 
         if weekly_data:
