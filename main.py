@@ -102,7 +102,8 @@ def call_groq(prompt, max_tokens=4000, retries=3):
                     "model": GROQ_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
-                    "max_tokens": max_tokens
+                    "max_completion_tokens": max_tokens,
+                    "reasoning_effort": "low"
                 },
                 timeout=90
             )
@@ -116,6 +117,9 @@ def call_groq(prompt, max_tokens=4000, retries=3):
                 return None
             result = response.json()
             content = result["choices"][0]["message"]["content"]
+            if not content:
+                logger.error("Groq 回應內容為空: " + json.dumps(result)[:500])
+                return None
             return content
         except Exception as e:
             logger.error("Groq API 失敗: " + str(e))
