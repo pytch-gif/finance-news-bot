@@ -55,7 +55,7 @@ RSS_SOURCES = {
 
 MAX_RAW_NEWS = 40
 FINAL_COUNT = 6
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-flash-latest"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
