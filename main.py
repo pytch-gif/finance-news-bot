@@ -219,7 +219,7 @@ def format_daily_zh(data):
 
 def format_daily_en(data):
     lines = [f"🇬🇧 English Version | ☀️ Daily Finance Brief - {TODAY_STR_EN}", "─" * 22]
-    lines.append(f"\n{data.get('intro_en', 'Good morning! Here are today\\'s top stories 👇')}\n")
+    lines.append(f"\n{data.get('intro_en', \"Good morning! Here are today's top stories 👇\")}\n")
     for item in data["news"]:
         lines.extend([
             f"{item['tag_en']}",
