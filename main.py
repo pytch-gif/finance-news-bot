@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 每日財經新聞篩選機器人 - 雙語版 (中文 + English)
+使用 Google Gemini API (Free Tier)
 平日早上 9 點推送，週五加發本週回顧
 """
 
@@ -16,7 +17,7 @@ import requests
 # ============ 設定 ============
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-CLAUDE_API_KEY = os.environ["CLAUDE_API_KEY"]
+GEMINI_API_KEY = os.environ["CLAUDE_API_KEY"]  # 沿用同一個 Secret 名稱
 
 SG_TIME = timezone(timedelta(hours=8))
 TODAY = datetime.now(SG_TIME)
@@ -54,7 +55,7 @@ RSS_SOURCES = {
 
 MAX_RAW_NEWS = 40
 FINAL_COUNT = 6
-CLAUDE_MODEL = "claude-3-5-haiku-20241022"
+GEMINI_MODEL = "gemini-1.5-flash"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -88,25 +89,70 @@ def fetch_rss():
     return all_news[:MAX_RAW_NEWS]
 
 
-def call_claude_daily(news_list):
-    """平日：生成每日新聞（雙語）"""
+def call_gemini(prompt, max_tokens=4000):
+    """呼叫 Gemini API"""
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            headers={"Content-Type": "application/json"},
+            params={"key": GEMINI_API_KEY},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": max_tokens
+                }
+            },
+            timeout=90
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        # 提取文字內容
+        content = result["candidates"][0]["content"]["parts"][0]["text"]
+        return content
+        
+    except Exception as e:
+        logger.error(f"Gemini API 失敗: {e}")
+        return None
+
+
+def extract_json(text):
+    """從 Gemini 回應中提取 JSON"""
+    if not text:
+        return None
+    # 移除 markdown 代碼塊標記
+    text = re.sub(r'^```json\s*', '', text.strip())
+    text = re.sub(r'\s*```$', '', text.strip())
+    # 找 JSON
+    json_match = re.search(r'\{.*\}', text, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            logger.error("JSON 解析失敗")
+            return None
+    return None
+
+
+def generate_daily_prompt(news_list):
+    """生成每日新聞的 Prompt"""
     news_text = ""
     for i, n in enumerate(news_list, 1):
         news_text += f"{i}. [{n['region']}] {n['title']}\n   Source: {n['source']}\n   Summary: {n['summary']}\n   Link: {n['link']}\n\n"
 
-    system_prompt = """You are a bilingual financial editor for young investors (18-35) in Singapore.
-Select 6 most relevant stories and output BOTH Chinese and English in one JSON.
+    return f"""You are a bilingual financial editor for young investors (18-35) in Singapore.
+Today is {TODAY_STR} / {TODAY_STR_EN}. Weekday: {WEEKDAY}.
 
-Selection criteria:
-- Relevant to daily life: rates, inflation, jobs, housing, stocks, crypto, consumer trends
-- Prioritize Singapore & Asia, include major global events
-- Explain WHY it matters, not just WHAT happened
-- Casual, friendly tone like chatting with a friend
+Here are today's financial news. Please select {FINAL_COUNT} most relevant stories and output bilingual JSON.
+
+News:
+{news_text}
 
 Output strict JSON:
-{
+{{
   "news": [
-    {
+    {{
       "tag_zh": "📈 股市動向",
       "tag_en": "📈 Markets",
       "title_zh": "Chinese headline",
@@ -116,61 +162,32 @@ Output strict JSON:
       "impact_zh": "💡 Meaning for young investors (Chinese)",
       "impact_en": "💡 Meaning for young investors (English)",
       "link": "URL"
-    }
+    }}
   ],
   "intro_zh": "Warm opening (Chinese)",
   "intro_en": "Warm opening (English)",
   "outro_zh": "Disclaimer (Chinese)",
   "outro_en": "Disclaimer (English)"
-}
+}}
 
 Tags: 📈股市/Markets, 🏠房產/Property, 💰宏觀/Macro, ₿加密/Crypto, 🇨🇳中國/China, 🇺🇸美國/US, 🌏亞洲/Asia, 🇸🇬新加坡/Singapore, 💳理財/PersonalFinance, 💼職場/Career, 🔬科技/Tech
 
 Output ONLY valid JSON. No markdown, no explanations."""
 
-    user_prompt = f"""Today is {TODAY_STR} / {TODAY_STR_EN}. Weekday: {WEEKDAY}.
-Here are today's financial news. Please select {FINAL_COUNT} stories and output bilingual JSON:
 
-{news_text}
-
-Output strict JSON only."""
-
-    try:
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": CLAUDE_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": CLAUDE_MODEL,
-                "max_tokens": 4000,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}]
-            },
-            timeout=90
-        )
-        response.raise_for_status()
-        content = response.json()["content"][0]["text"]
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-        raise ValueError("No JSON found")
-    except Exception as e:
-        logger.error(f"Claude daily failed: {e}")
-        return None
-
-
-def call_claude_weekly(news_list):
-    """週五：生成本週回顧"""
+def generate_weekly_prompt(news_list):
+    """生成週回顧的 Prompt"""
     headlines = "\n".join([f"- {n['title']}" for n in news_list[:30]])
 
-    system_prompt = """You are a financial editor. Today is Friday. Based on this week's headlines, generate a weekly review for young investors.
+    return f"""You are a financial editor. Today is Friday. Based on this week's headlines, generate a weekly review for young investors.
+
+Headlines:
+{headlines}
+
 Output strict JSON:
-{
+{{
   "themes": [
-    {"emoji": "📈", "title_zh": "主題", "title_en": "Theme", "desc_zh": "描述", "desc_en": "Description"}
+    {{"emoji": "📈", "title_zh": "主題", "title_en": "Theme", "desc_zh": "描述", "desc_en": "Description"}}
   ],
   "market_zh": "本周市場總結 (Chinese)",
   "market_en": "Market summary (English)",
@@ -178,35 +195,9 @@ Output strict JSON:
   "watch_en": "Watch next week (English)",
   "quote_zh": "投資金句 (Chinese)",
   "quote_en": "Investment quote (English)"
-}"""
+}}
 
-    user_prompt = f"""This week's headlines:\n{headlines}\n\nGenerate weekly review JSON only."""
-
-    try:
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": CLAUDE_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": CLAUDE_MODEL,
-                "max_tokens": 2000,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}]
-            },
-            timeout=60
-        )
-        response.raise_for_status()
-        content = response.json()["content"][0]["text"]
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-        raise ValueError("No JSON found")
-    except Exception as e:
-        logger.error(f"Claude weekly failed: {e}")
-        return None
+Output ONLY valid JSON."""
 
 
 def format_daily_zh(data):
@@ -263,6 +254,7 @@ def format_weekly(data):
 
 
 def send_telegram(message):
+    """發送到 Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "disable_web_page_preview": False}
     try:
@@ -270,7 +262,7 @@ def send_telegram(message):
         response.raise_for_status()
         return True
     except Exception as e:
-        logger.error(f"Telegram failed: {e}")
+        logger.error(f"Telegram 發送失敗: {e}")
         return False
 
 
@@ -283,15 +275,16 @@ def main():
         return
 
     # === 平日：每日新聞 ===
-    daily_data = call_claude_daily(raw_news)
+    daily_prompt = generate_daily_prompt(raw_news)
+    daily_content = call_gemini(daily_prompt, max_tokens=4000)
+    daily_data = extract_json(daily_content)
+    
     if daily_data:
-        # 中文
         msg_zh = format_daily_zh(daily_data)
         if msg_zh and send_telegram(msg_zh):
             logger.info("中文版發送成功 ✅")
         time.sleep(3)
         
-        # 英文
         msg_en = format_daily_en(daily_data)
         if msg_en and send_telegram(msg_en):
             logger.info("英文版發送成功 ✅")
@@ -301,7 +294,10 @@ def main():
     # === 週五：本週回顧 ===
     if WEEKDAY == 4:
         time.sleep(3)
-        weekly_data = call_claude_weekly(raw_news)
+        weekly_prompt = generate_weekly_prompt(raw_news)
+        weekly_content = call_gemini(weekly_prompt, max_tokens=2000)
+        weekly_data = extract_json(weekly_content)
+        
         if weekly_data:
             msg_weekly = format_weekly(weekly_data)
             if msg_weekly and send_telegram(msg_weekly):
