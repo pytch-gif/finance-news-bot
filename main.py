@@ -51,6 +51,11 @@ RSS_SOURCES = {
         "https://www.theblock.co/rss.xml",
         "https://techcrunch.com/feed/",
     ],
+    "💳 理財與儲蓄": [
+        "https://dollarsandsense.sg/feed/",
+        "https://blog.moneysmart.sg/feed/",
+        "https://blog.seedly.sg/feed/",
+    ],
 }
 
 MAX_RAW_NEWS = 20
@@ -62,8 +67,9 @@ logger = logging.getLogger(__name__)
 
 
 def fetch_rss():
-    all_news = []
+    by_region = {}
     for region, urls in RSS_SOURCES.items():
+        region_news = []
         for url in urls:
             try:
                 logger.info("抓取中: " + url)
@@ -74,7 +80,7 @@ def fetch_rss():
                     summary = entry.get("summary", entry.get("description", "")).strip()
                     summary = re.sub(r"<[^>]+>", "", summary)[:150]
                     if title and link:
-                        all_news.append({
+                        region_news.append({
                             "region": region,
                             "title": title,
                             "link": link,
@@ -84,8 +90,23 @@ def fetch_rss():
             except Exception as e:
                 logger.warning("RSS 失敗 (" + url + "): " + str(e))
                 continue
-    logger.info("共抓取 " + str(len(all_news)) + " 篇原始新聞")
-    return all_news[:MAX_RAW_NEWS]
+        by_region[region] = region_news
+
+    total_fetched = sum(len(v) for v in by_region.values())
+    logger.info("共抓取 " + str(total_fetched) + " 篇原始新聞")
+
+    # 輪流從每個分類取新聞，確保每個分類都有機會入選，而不是被抓取順序決定
+    all_news = []
+    lists = list(by_region.values())
+    round_index = 0
+    while len(all_news) < MAX_RAW_NEWS and any(round_index < len(lst) for lst in lists):
+        for lst in lists:
+            if round_index < len(lst):
+                all_news.append(lst[round_index])
+                if len(all_news) >= MAX_RAW_NEWS:
+                    break
+        round_index += 1
+    return all_news
 
 
 def call_groq(prompt, max_tokens=4000, retries=3):
@@ -155,7 +176,8 @@ def generate_daily_prompt(news_list):
 
     prompt = "You are a bilingual financial editor for young investors (18-35) in Singapore.\n"
     prompt += "Today is " + TODAY_STR + " / " + TODAY_STR_EN + ". Weekday: " + str(WEEKDAY) + ".\n\n"
-    prompt += "Here are today's financial news. Please select " + str(FINAL_COUNT) + " most relevant stories and output bilingual JSON.\n\n"
+    prompt += "Here are today's financial news. Select " + str(FINAL_COUNT) + " stories and output bilingual JSON.\n"
+    prompt += "Aim for a mix, not just markets/macro news: include at least 1-2 stories about personal finance, budgeting, or savings if any are available in the list below, alongside markets/macro/crypto/property stories.\n\n"
     prompt += "News:\n" + news_text + "\n"
     prompt += """Output strict JSON:
 {
