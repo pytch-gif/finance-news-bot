@@ -55,7 +55,7 @@ RSS_SOURCES = {
 
 MAX_RAW_NEWS = 40
 FINAL_COUNT = 6
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -262,11 +262,12 @@ def send_telegram(message):
 
 def main():
     logger.info("啟動 - " + TODAY_STR + " (Weekday: " + str(WEEKDAY) + ")")
+    ok = True
 
     raw_news = fetch_rss()
     if not raw_news:
         logger.error("沒有抓到新聞")
-        return
+        return False
 
     daily_prompt = generate_daily_prompt(raw_news)
     daily_content = call_gemini(daily_prompt, max_tokens=4000)
@@ -276,13 +277,18 @@ def main():
         msg_zh = format_daily_zh(daily_data)
         if msg_zh and send_telegram(msg_zh):
             logger.info("中文版發送成功")
+        else:
+            ok = False
         time.sleep(3)
 
         msg_en = format_daily_en(daily_data)
         if msg_en and send_telegram(msg_en):
             logger.info("英文版發送成功")
+        else:
+            ok = False
     else:
         logger.error("每日新聞生成失敗")
+        ok = False
 
     if WEEKDAY == 4:
         time.sleep(3)
@@ -294,11 +300,16 @@ def main():
             msg_weekly = format_weekly(weekly_data)
             if msg_weekly and send_telegram(msg_weekly):
                 logger.info("本週回顧發送成功")
+            else:
+                ok = False
         else:
             logger.error("本週回顧生成失敗")
+            ok = False
 
     logger.info("任務完成")
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(0 if main() else 1)
