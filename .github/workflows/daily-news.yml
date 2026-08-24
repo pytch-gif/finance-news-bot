@@ -1,32 +1,53 @@
-name: Daily Finance News Bot
+name: MY-SG Cross-Border Money & Content Radar
 
 on:
   schedule:
-    # 週一到周五 UTC 01:00 = 新加坡 09:00
+    # Monday-Friday at 09:00 Singapore/Malaysia time (UTC+8).
     - cron: '0 1 * * 1-5'
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: my-sg-daily-news
+  cancel-in-progress: false
 
 jobs:
   send-news:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout code
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install --requirement requirements.txt
 
-      - name: Debug secret presence
-        run: echo "GROQ_API_KEY set? ${{ secrets.GROQ_API_KEY != '' }}"
-
-      - name: Run news bot
+      - name: Validate required secrets
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          test -n "$TELEGRAM_BOT_TOKEN" || { echo "Missing TELEGRAM_BOT_TOKEN"; exit 1; }
+          test -n "$TELEGRAM_CHAT_ID" || { echo "Missing TELEGRAM_CHAT_ID"; exit 1; }
+          test -n "$GROQ_API_KEY" || { echo "Missing GROQ_API_KEY"; exit 1; }
+
+      - name: Run MY-SG news scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MIN_RELEVANCE_SCORE: '5'
+          MAX_CANDIDATES: '30'
+          FINAL_COUNT: '5'
+          MAX_ARTICLE_AGE_HOURS: '36'
+          MONDAY_MAX_ARTICLE_AGE_HOURS: '72'
         run: python main.py
