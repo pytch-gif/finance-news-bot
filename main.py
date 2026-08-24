@@ -163,18 +163,14 @@ def entry_datetime(entry):
 
     for key in ("published", "updated", "created"):
         value = entry.get(key)
-        if value:
         if not value:
             continue
         try:
             parsed = parsedate_to_datetime(value)
         except (TypeError, ValueError, OverflowError):
             try:
-                parsed = parsedate_to_datetime(value)
-                return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(SG_TIME)
                 parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             except (TypeError, ValueError, OverflowError):
-                pass
                 continue
         return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(SG_TIME)
     return None
@@ -217,7 +213,6 @@ def relevance_score(title, summary, published_at=None, country_context=None):
         score -= 4
 
     if published_at:
-        age_hours = max(0, (NOW - published_at).total_seconds() / 3600)
         age_hours = article_age_hours(published_at)
         if age_hours <= 30:
             score += 2
@@ -307,7 +302,6 @@ def fetch_rss():
         source_counts[item["source"]] = count + 1
         if len(selected) >= MAX_CANDIDATES:
             break
-    logger.info("Kept %d relevant stories from %d scored stories", len(selected), len(candidates))
     logger.info(
         "Kept %d relevant stories; rejected %d stale and %d undated entries (freshness limit: %dh)",
         len(selected), stale_count, undated_count, freshness_limit_hours(),
