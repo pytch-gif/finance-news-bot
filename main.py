@@ -26,6 +26,8 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "30"))
 FINAL_COUNT = int(os.getenv("FINAL_COUNT", "5"))
 MIN_RELEVANCE_SCORE = int(os.getenv("MIN_RELEVANCE_SCORE", "5"))
+MAX_ARTICLE_AGE_HOURS = int(os.getenv("MAX_ARTICLE_AGE_HOURS", "36"))
+MONDAY_MAX_ARTICLE_AGE_HOURS = int(os.getenv("MONDAY_MAX_ARTICLE_AGE_HOURS", "72"))
 MAX_ARTICLES_PER_SOURCE = 5
 
 # Feeds are intentionally local and practical. Broad global-market and crypto feeds
@@ -150,6 +152,13 @@ def contains_term(text, term):
 
 
 def entry_datetime(entry):
+    for key in ("published_parsed", "updated_parsed", "created_parsed"):
+        value = entry.get(key)
+        if value:
+            try:
+                return datetime(*value[:6], tzinfo=timezone.utc).astimezone(SG_TIME)
+            except (TypeError, ValueError, OverflowError):
+                pass
     for key in ("published", "updated", "created"):
         value = entry.get(key)
         if value:
@@ -157,8 +166,26 @@ def entry_datetime(entry):
                 parsed = parsedate_to_datetime(value)
                 return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(SG_TIME)
             except (TypeError, ValueError, OverflowError):
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(SG_TIME)
+                except (TypeError, ValueError, OverflowError):
                 pass
+                    pass
     return None
+
+
+def article_age_hours(published_at):
+    return max(0, (NOW - published_at).total_seconds() / 3600)
+
+
+def freshness_limit_hours():
+    return MONDAY_MAX_ARTICLE_AGE_HOURS if WEEKDAY == 0 else MAX_ARTICLE_AGE_HOURS
+
+
+def is_fresh_article(published_at):
+    # An article without a reliable timestamp cannot be guaranteed to be daily news.
+    return published_at is not None and article_age_hours(published_at) <= freshness_limit_hours()
 
 
 def relevance_score(title, summary, published_at=None, country_context=None):
@@ -186,6 +213,7 @@ def relevance_score(title, summary, published_at=None, country_context=None):
 
     if published_at:
         age_hours = max(0, (NOW - published_at).total_seconds() / 3600)
+        age_hours = article_age_hours(published_at)
         if age_hours <= 30:
             score += 2
         elif age_hours > 120:
@@ -217,6 +245,7 @@ def classify_topic(title, summary):
 
 def fetch_rss():
     candidates, seen = [], set()
+    stale_count, undated_count = 0, 0
     headers = {"User-Agent": "MY-SG-News-Bot/2.0 (+RSS reader)"}
     for section, urls in RSS_SOURCES.items():
         for url in urls:
@@ -237,6 +266,12 @@ def fetch_rss():
                         continue
                     seen.add(key)
                     published_at = entry_datetime(entry)
+                    if published_at is None:
+                        undated_count += 1
+                        continue
+                    if not is_fresh_article(published_at):
+                        stale_count += 1
+                        continue
                     score, matched = relevance_score(
                         title, summary, published_at, source_country_context(url)
                     )
@@ -268,6 +303,10 @@ def fetch_rss():
         if len(selected) >= MAX_CANDIDATES:
             break
     logger.info("Kept %d relevant stories from %d scored stories", len(selected), len(candidates))
+    logger.info(
+        "Kept %d relevant stories; rejected %d stale and %d undated entries (freshness limit: %dh)",
+        len(selected), stale_count, undated_count, freshness_limit_hours(),
+    )
     return selected
 
 
