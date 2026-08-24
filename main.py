@@ -154,24 +154,29 @@ def contains_term(text, term):
 def entry_datetime(entry):
     for key in ("published_parsed", "updated_parsed", "created_parsed"):
         value = entry.get(key)
-        if value:
-            try:
-                return datetime(*value[:6], tzinfo=timezone.utc).astimezone(SG_TIME)
-            except (TypeError, ValueError, OverflowError):
-                pass
+        if not value:
+            continue
+        try:
+            return datetime(*value[:6], tzinfo=timezone.utc).astimezone(SG_TIME)
+        except (TypeError, ValueError, OverflowError):
+            continue
+
     for key in ("published", "updated", "created"):
         value = entry.get(key)
         if value:
+        if not value:
+            continue
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
             try:
                 parsed = parsedate_to_datetime(value)
                 return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(SG_TIME)
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             except (TypeError, ValueError, OverflowError):
-                try:
-                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                    return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(SG_TIME)
-                except (TypeError, ValueError, OverflowError):
                 pass
-                    pass
+                continue
+        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(SG_TIME)
     return None
 
 
