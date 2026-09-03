@@ -30,4 +30,3 @@ jobs:
           TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.INTERNAL_TELEGRAM_MESSAGE_THREAD_ID }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python main.py
-
