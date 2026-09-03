@@ -33,33 +33,99 @@ MAX_ARTICLES_PER_SOURCE = 5
 # Feeds are intentionally local and practical. Broad global-market and crypto feeds
 # were removed because they produced stories with no clear cross-border money decision.
 RSS_SOURCES = {
+    # =========================================================
+    # MALAYSIA
+    # =========================================================
     "🇲🇾 Malaysia money & policy": [
+        # News
         "https://www.malaymail.com/feed/rss/money",
         "https://www.malaymail.com/feed/rss/malaysia",
         "https://www.bernama.com/en/rssfeed.php",
         "https://www.thestar.com.my/rss/Business/Business-News/",
+
+        # High-value official / primary sources
+        "https://www.bnm.gov.my/rss",
+        "https://www.dosm.gov.my/",
+        "https://www.mof.gov.my/",
+        "https://www.kwsp.gov.my/",
+        "https://www.hasil.gov.my/",
+
+        # Stronger business reporting
+        "https://theedgemalaysia.com/",
     ],
+
+    # =========================================================
+    # SINGAPORE
+    # =========================================================
     "🇸🇬 Singapore work & economy": [
+        # News
         "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=10416",
         "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6936",
         "https://www.businesstimes.com.sg/rss/economy-policy",
         "https://www.businesstimes.com.sg/rss/working-life",
         "https://www.businesstimes.com.sg/rss/personal-finance",
+
+        # Work / career
         "https://hrmasia.com/feed/",
+
+        # Official sources
+        "https://www.mom.gov.sg/newsroom",
+        "https://www.iras.gov.sg/latest-updates",
+        "https://www.mof.gov.sg/news-resources/newsroom/",
+        "https://www.singstat.gov.sg/",
+
+        # Social / trending
         "https://mothership.sg/feed",
     ],
+
+    # =========================================================
+    # MALAYSIA <-> SINGAPORE
+    # =========================================================
+    "🇲🇾↔️🇸🇬 Cross-border life": [
+        "https://www.ica.gov.sg/news-and-publications/newsroom",
+        "https://www.lta.gov.sg/content/ltagov/en/newsroom.html",
+        "https://www.mot.gov.my/",
+        "https://www.jpj.gov.my/",
+    ],
+
+    # =========================================================
+    # PERSONAL FINANCE
+    # =========================================================
     "💳 Personal finance": [
+        # Singapore
         "https://dollarsandsense.sg/feed/",
         "https://blog.moneysmart.sg/feed/",
         "https://blog.seedly.sg/feed/",
+
+        # Malaysia
         "https://ringgitplus.com/en/blog/feed/",
         "https://www.imoney.my/articles/feed/",
         "https://ringgitohringgit.com/feed/",
     ],
-    "🏠 Malaysia property & living costs": [
+
+    # =========================================================
+    # PROPERTY / COST OF LIVING
+    # =========================================================
+    "🏠 Property, rent & living costs": [
+        # Malaysia
         "https://www.propertyguru.com.my/news-rss/guru-views",
+        "https://www.edgeprop.my/",
+
+        # Singapore primary data
+        "https://www.ura.gov.sg/Corporate/Media-Room/Media-Releases",
     ],
-    "🎙️ Malaysian content ideas": [
+
+    # =========================================================
+    # PODCASTS / EXPERT COMMENTARY
+    # =========================================================
+    "🎙️ Expert commentary & content ideas": [
+        # Malaysia
+        "https://www.bfm.my/",
+
+        # Singapore
+        "https://omny.fm/shows/moneyfm-893/playlists/podcast",
+
+        # Existing Malaysian podcast
         "https://www.omnycontent.com/d/playlist/de62ff84-6498-49d0-a266-a9d50120c712/1139cb70-e7fa-476c-9ccc-ab090040379e/acb27c03-f82a-4061-9a6c-ab09004037a3/podcast.rss",
     ],
 }
@@ -117,10 +183,16 @@ GLOBAL_MARKET_TERMS = (
 MALAYSIA_SOURCE_HOSTS = (
     "malaymail.com", "bernama.com", "thestar.com.my", "ringgitplus.com",
     "imoney.my", "ringgitohringgit.com", "propertyguru.com.my",
+    "bnm.gov.my", "dosm.gov.my", "mof.gov.my", "kwsp.gov.my",
+    "hasil.gov.my", "theedgemalaysia.com", "edgeprop.my", "bfm.my",
+    "mot.gov.my", "jpj.gov.my",
 )
 SINGAPORE_SOURCE_HOSTS = (
     "channelnewsasia.com", "businesstimes.com.sg", "mothership.sg",
     "dollarsandsense.sg", "moneysmart.sg", "seedly.sg",
+    "hrmasia.com", "mom.gov.sg", "iras.gov.sg", "mof.gov.sg",
+    "singstat.gov.sg", "ica.gov.sg", "lta.gov.sg", "ura.gov.sg",
+    "omny.fm",
 )
 
 TOPIC_RULES = {
