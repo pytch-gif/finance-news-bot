@@ -22,6 +22,9 @@ TODAY_STR = NOW.strftime("%Y年%m月%d日")
 TODAY_STR_EN = NOW.strftime("%B %d, %Y")
 WEEKDAY = NOW.weekday()
 
+# ── FIX 1: Read BOT_MODE so internal and external can behave differently ──────
+BOT_MODE = os.getenv("BOT_MODE", "external")   # "internal" or "external"
+
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "30"))
 FINAL_COUNT = int(os.getenv("FINAL_COUNT", "5"))
@@ -438,12 +441,51 @@ def news_for_prompt(news_list):
     return "\n\n".join(blocks)
 
 
-def generate_daily_prompt(news_list):
+# ── FIX 3 & 4: Separate prompts per mode ─────────────────────────────────────
+
+def generate_internal_prompt(news_list):
+    """Internal team prompt: focus on content opportunity for PYTCH creators."""
     return f"""You are the bilingual editor and content strategist for PYTCH. Your exact audience is Malaysians aged roughly 20-45 who work in Singapore, including daily commuters and people living in Singapore.
 
 Today is {TODAY_STR_EN}. Choose exactly {min(FINAL_COUNT, len(news_list))} stories from the vetted candidates below.
 
-Editorial test: every selected story must answer, 'What money, career, housing, tax, banking, protection, or commuting decision does this create for a Malaysian working in Singapore?'
+Internal editorial test: for each story, ask "Can this become a strong PYTCH content idea that hits a real cross-border pain point for Malaysians working in Singapore?"
+
+Rules:
+- Prioritise stories with the strongest content opportunity: SGD/MYR, remittance, salaries, jobs and passes, tax, CPF/EPF, rent/property, cost of living, banking, insurance/healthcare, Causeway/RTS/JS-SEZ.
+- Reject generic global markets, company earnings, crypto and investment-price updates unless there is a concrete MY-SG household consequence.
+- Prefer a useful mix of topics and no more than two stories on the same topic.
+- Use only candidate IDs. Never invent facts, URLs, numbers or policy details.
+- 'decision' must be a specific action or question for the audience, not generic investment advice.
+- 'content_angle' should be a practical PYTCH explainer, calculator, checklist, comparison, myth-buster or audience poll — be specific and creative.
+
+Candidates:
+{news_for_prompt(news_list)}
+
+Return ONLY valid JSON:
+{{
+  "intro_en": "one-sentence opening for the team briefing",
+  "news": [
+    {{
+      "source_id": 1,
+      "tag_en": "emoji + English topic",
+      "title_en": "English headline",
+      "why_en": "why this specifically matters to Malaysians working in Singapore",
+      "decision_en": "✅ one concrete decision/question",
+      "content_angle_en": "🎬 PYTCH content opportunity — specific format and angle"
+    }}
+  ],
+  "outro_en": "short internal note or editorial observation"
+}}"""
+
+
+def generate_external_prompt(news_list):
+    """External audience prompt: bilingual, focus on relevance and actionability."""
+    return f"""You are the bilingual editor and content strategist for PYTCH. Your exact audience is Malaysians aged roughly 20-45 who work in Singapore, including daily commuters and people living in Singapore.
+
+Today is {TODAY_STR_EN}. Choose exactly {min(FINAL_COUNT, len(news_list))} stories from the vetted candidates below.
+
+Editorial test: every selected story must answer, 'Is this relevant to Malaysians working in Singapore, and what money, career, housing, tax, banking, protection, or commuting decision does it create?'
 
 Rules:
 - Prioritise direct Malaysia-Singapore consequences: SGD/MYR, remittance, salaries, jobs and passes, tax, CPF/EPF, rent/property, cost of living, banking, insurance/healthcare, Causeway/RTS/JS-SEZ.
@@ -451,7 +493,6 @@ Rules:
 - Prefer a useful mix of topics and no more than two stories on the same topic.
 - Use only candidate IDs. Never invent facts, URLs, numbers or policy details.
 - 'decision' must be a specific action or question for the audience, not generic investment advice.
-- 'content_angle' should be a practical PYTCH explainer, calculator, checklist, comparison, myth-buster or audience poll.
 - Use natural Simplified Chinese and Malaysian/Singaporean English. Keep every field concise.
 
 Candidates:
@@ -471,9 +512,7 @@ Return ONLY valid JSON:
       "why_zh": "why this specifically matters to Malaysians working in Singapore",
       "why_en": "why this specifically matters to Malaysians working in Singapore",
       "decision_zh": "✅ one concrete decision/question",
-      "decision_en": "✅ one concrete decision/question",
-      "content_angle_zh": "🎬 PYTCH content opportunity",
-      "content_angle_en": "🎬 PYTCH content opportunity"
+      "decision_en": "✅ one concrete decision/question"
     }}
   ],
   "outro_zh": "short informational disclaimer",
@@ -481,14 +520,40 @@ Return ONLY valid JSON:
 }}"""
 
 
-def hydrate_daily(data, news_list):
+def hydrate_internal(data, news_list):
+    """Validate and hydrate internal (English-only) daily data."""
+    lookup = {n["id"]: n for n in news_list}
+    clean_items, used = [], set()
+    if not isinstance(data, dict) or not isinstance(data.get("news"), list):
+        return None
+    required = ("tag_en", "title_en", "why_en", "decision_en", "content_angle_en")
+    for item in data["news"]:
+        try:
+            source_id = int(item.get("source_id"))
+        except (TypeError, ValueError):
+            continue
+        source = lookup.get(source_id)
+        if not source or source_id in used or not all(item.get(key) for key in required):
+            continue
+        used.add(source_id)
+        item["link"] = source["link"]
+        item["source"] = source["source"]
+        clean_items.append(item)
+    if not clean_items:
+        return None
+    data["news"] = clean_items[:FINAL_COUNT]
+    return data
+
+
+def hydrate_external(data, news_list):
+    """Validate and hydrate external (bilingual) daily data."""
     lookup = {n["id"]: n for n in news_list}
     clean_items, used = [], set()
     if not isinstance(data, dict) or not isinstance(data.get("news"), list):
         return None
     required = (
-        "tag_zh", "tag_en", "title_zh", "title_en", "why_zh", "why_en",
-        "decision_zh", "decision_en", "content_angle_zh", "content_angle_en",
+        "tag_zh", "tag_en", "title_zh", "title_en",
+        "why_zh", "why_en", "decision_zh", "decision_en",
     )
     for item in data["news"]:
         try:
@@ -517,7 +582,33 @@ Return ONLY valid JSON:
 {{"themes":[{{"emoji":"💱","title_zh":"主题","title_en":"Theme","desc_zh":"具体影响","desc_en":"Concrete impact"}}],"watch_zh":"下周留意的决定","watch_en":"Decision to watch next week","content_zh":"下周最值得制作的PYTCH内容","content_en":"Best PYTCH content opportunity for next week"}}"""
 
 
-def format_daily(data, language):
+# ── FIX 3: Internal format — English only, includes content_angle ─────────────
+
+def format_internal(data):
+    lines = [
+        "🔒 PYTCH Internal | Content Radar · " + TODAY_STR_EN,
+        "─" * 22,
+        "",
+        data.get("intro_en", ""),
+        "",
+    ]
+    for item in data["news"]:
+        lines.extend([
+            item["tag_en"],
+            "📰 " + item["title_en"],
+            "📝 " + item["why_en"],
+            item["decision_en"],
+            item["content_angle_en"],
+            "🔗 " + item["link"],
+            "",
+        ])
+    lines.append(data.get("outro_en", "Internal use only."))
+    return "\n".join(lines)
+
+
+# ── FIX 3: External format — bilingual, NO content_angle ─────────────────────
+
+def format_external(data, language):
     zh = language == "zh"
     lines = [
         ("🇨🇳 中文版 | 🇲🇾→🇸🇬 跨境钱事 · " + TODAY_STR) if zh
@@ -534,7 +625,7 @@ def format_daily(data, language):
             "📰 " + item[f"title_{suffix}"],
             "📝 " + item[f"why_{suffix}"],
             item[f"decision_{suffix}"],
-            item[f"content_angle_{suffix}"],
+            # NOTE: content_angle intentionally omitted — internal only
             "🔗 " + item["link"],
             "",
         ])
@@ -559,11 +650,17 @@ def format_weekly(data):
     return "\n".join(lines)
 
 
+# ── FIX 2: Pass message_thread_id to Telegram when env var is set ────────────
+
 def send_telegram(message):
-    token, chat_id = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    thread_id = os.getenv("TELEGRAM_MESSAGE_THREAD_ID")   # only set for internal group topics
+
     if not token or not chat_id:
         logger.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
         return False
+
     # Telegram text messages are limited to 4,096 characters. Split on paragraph
     # boundaries so a richer content-opportunity brief still arrives reliably.
     chunks, current = [], ""
@@ -577,11 +674,20 @@ def send_telegram(message):
             current = paragraph
     if current:
         chunks.append(current)
+
     for chunk in chunks:
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "disable_web_page_preview": True,
+        }
+        if thread_id:
+            payload["message_thread_id"] = int(thread_id)   # route to correct topic thread
+
         try:
             response = requests.post(
                 "https://api.telegram.org/bot" + token + "/sendMessage",
-                json={"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True},
+                json=payload,
                 timeout=30,
             )
             response.raise_for_status()
@@ -592,31 +698,50 @@ def send_telegram(message):
     return True
 
 
+# ── FIX 1 & 4: Branch on BOT_MODE in main() ──────────────────────────────────
+
 def main():
-    logger.info("Starting MY-SG news scan for %s", TODAY_STR_EN)
+    logger.info("Starting MY-SG news scan for %s (mode: %s)", TODAY_STR_EN, BOT_MODE)
     raw_news = fetch_rss()
     if not raw_news:
         logger.error("No stories met the MY-SG relevance threshold")
         return False
 
-    daily = hydrate_daily(extract_json(call_groq(generate_daily_prompt(raw_news))), raw_news)
-    if not daily:
-        logger.error("Daily brief generation or validation failed")
-        return False
+    if BOT_MODE == "internal":
+        # Internal channel: English only, includes content angles for the PYTCH team
+        daily = hydrate_internal(
+            extract_json(call_groq(generate_internal_prompt(raw_news))),
+            raw_news,
+        )
+        if not daily:
+            logger.error("Internal daily brief generation or validation failed")
+            return False
+        ok = send_telegram(format_internal(daily))
 
-    ok = send_telegram(format_daily(daily, "zh"))
-    time.sleep(2)
-    ok = send_telegram(format_daily(daily, "en")) and ok
+        # Friday weekly content radar (internal only)
+        if WEEKDAY == 4:
+            weekly = extract_json(call_groq(generate_weekly_prompt(raw_news), max_tokens=1800))
+            if weekly:
+                time.sleep(2)
+                ok = send_telegram(format_weekly(weekly)) and ok
+            else:
+                logger.error("Weekly content radar generation failed")
+                ok = False
 
-    if WEEKDAY == 4:
-        weekly = extract_json(call_groq(generate_weekly_prompt(raw_news), max_tokens=1800))
-        if weekly:
-            time.sleep(2)
-            ok = send_telegram(format_weekly(weekly)) and ok
-        else:
-            logger.error("Weekly content radar generation failed")
-            ok = False
-    logger.info("Task completed")
+    else:
+        # External channel: bilingual (Chinese then English), no content angles
+        daily = hydrate_external(
+            extract_json(call_groq(generate_external_prompt(raw_news))),
+            raw_news,
+        )
+        if not daily:
+            logger.error("External daily brief generation or validation failed")
+            return False
+        ok = send_telegram(format_external(daily, "zh"))
+        time.sleep(2)
+        ok = send_telegram(format_external(daily, "en")) and ok
+
+    logger.info("Task completed (mode: %s)", BOT_MODE)
     return ok
 
 
