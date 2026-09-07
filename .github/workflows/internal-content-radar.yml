@@ -3,7 +3,7 @@ name: PYTCH Content Radar
 on:
   schedule:
     # Monday-Friday, 09:30 Singapore time = 01:30 UTC
-    - cron: '30 1 * * 1-5'
+    - cron: '47 1 * * 1-5'
   workflow_dispatch:
 
 jobs:
