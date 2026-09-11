@@ -2,8 +2,10 @@ name: MY-SG Daily Brief
 
 on:
   schedule:
-    # Monday-Friday, 09:00 Singapore time = 01:00 UTC
-    - cron: '0 1 * * 1-5'
+    # Monday-Friday, ~09:13 Singapore time = 01:13 UTC.
+    # Off a round number on purpose: GitHub Actions scheduled runs queue worst
+    # at the top of the hour, which was causing multi-hour send delays.
+    - cron: '13 1 * * 1-5'
   workflow_dispatch:
 
 jobs:
