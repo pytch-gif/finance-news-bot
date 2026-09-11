@@ -10,7 +10,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import feedparser
 import requests
@@ -52,11 +52,11 @@ RSS_SOURCES = {
         "https://www.thestar.com.my/rss/Business/Business-News/",
 
         # High-value official / primary sources
-        "https://www.bnm.gov.my/rss",
-        "https://www.dosm.gov.my/",
-        "https://www.mof.gov.my/",
-        "https://www.kwsp.gov.my/",
-        "https://www.hasil.gov.my/",
+        # BNM moved to WEB_SOURCES (scraped from /pr) — /rss was never a real feed.
+        "https://www.dosm.gov.my/",  # TODO(web-scrape): homepage has no server-rendered listing at all, needs a JS-capable fetch (not attempted — adds a headless-browser dependency)
+        "https://www.mof.gov.my/",  # TODO(web-scrape): homepage has no server-rendered listing at all, needs research for a real newsroom subpage
+        "https://www.kwsp.gov.my/",  # TODO(web-scrape): no working RSS, currently yields 0 candidates
+        "https://www.hasil.gov.my/feed/",  # real WordPress feed (site's homepage URL is NOT a feed)
 
         # Stronger business reporting
         "https://theedgemalaysia.com/",
@@ -76,11 +76,9 @@ RSS_SOURCES = {
         # Work / career
         "https://hrmasia.com/feed/",
 
-        # Official sources
-        "https://www.mom.gov.sg/newsroom",
-        "https://www.iras.gov.sg/latest-updates",
-        "https://www.mof.gov.sg/news-resources/newsroom/",
-        "https://www.singstat.gov.sg/",
+        # Official sources — MOM and MOF SG moved to WEB_SOURCES (scraped, see
+        # below); neither ever had a real RSS feed to begin with.
+        "https://www.singstat.gov.sg/",  # TODO(web-scrape): homepage has no article-style listing (release-calendar site), needs a different approach or skip
 
         # Social / trending
         "https://mothership.sg/feed",
@@ -90,10 +88,10 @@ RSS_SOURCES = {
     # MALAYSIA <-> SINGAPORE
     # =========================================================
     "🇲🇾↔️🇸🇬 Cross-border life": [
-        "https://www.ica.gov.sg/news-and-publications/newsroom",
-        "https://www.lta.gov.sg/content/ltagov/en/newsroom.html",
-        "https://www.mot.gov.my/",
-        "https://www.jpj.gov.my/",
+        "https://www.ica.gov.sg/news-and-publications/newsroom",  # TODO(web-scrape): no working RSS, currently yields 0 candidates
+        # LTA moved to WEB_SOURCES (scraped) — its page never had a real RSS feed.
+        "https://www.mot.gov.my/",  # TODO(web-scrape): no working RSS, currently yields 0 candidates
+        "https://www.jpj.gov.my/",  # TODO(web-scrape): no working RSS, currently yields 0 candidates
     ],
 
     # =========================================================
@@ -128,7 +126,7 @@ RSS_SOURCES = {
     # =========================================================
     "🎙️ Expert commentary & content ideas": [
         # Malaysia
-        "https://www.bfm.my/",
+        "https://www.bfm.my/",  # TODO(web-scrape): no working RSS, currently yields 0 candidates
 
         # Singapore
         "https://omny.fm/shows/moneyfm-893/playlists/podcast",
@@ -237,6 +235,86 @@ TOPIC_RULES = {
     "🏠 Housing & costs": ("rent", "rental", "housing", "property", "cost of living", "inflation"),
     "🚆 Cross-border life": ("johor", "causeway", "rts", "commute", "customs", "immigration", "woodlands", "tuas"),
     "🏦 Banking & protection": ("bank", "interest rate", "fixed deposit", "loan", "insurance", "healthcare"),
+}
+
+# Tier 1 government sites that don't publish RSS/Atom at all (per the boss's
+# spec: "Web: Scrape newsroom ... pages when no reliable RSS feed exists. Do
+# not invent RSS feeds."). Each entry's item_pattern is reverse-engineered
+# against the site's actual markup — verified working as of Sep 2026; a site
+# redesign will silently break it (fetch_web logs a warning and yields 0
+# candidates for that source, same as a dead RSS feed would).
+WEB_SOURCES = {
+    "🇲🇾 Malaysia money & policy": [
+        {
+            # BNM press releases: a plain HTML table, <td><p>DD Mon YYYY</p></td>
+            # followed by <td><p><a href="...">Title</a></p></td>. Absolute
+            # links already, so "base" is unused here but kept for consistency.
+            "url": "https://www.bnm.gov.my/pr",
+            "base": "https://www.bnm.gov.my",
+            "item_pattern": re.compile(
+                r'<tr>\s*<td>\s*<p>(?P<date>\d{1,2}\s+\w+\s+\d{4})</p>\s*</td>\s*'
+                r'<td>\s*<p><a href="(?P<link>[^"]+)"[^>]*>(?P<title>[^<]+)</a></p>',
+                re.S,
+            ),
+            "date_format": "%d %b %Y",
+        },
+    ],
+    "🇸🇬 Singapore work & economy": [
+        {
+            # MOM newsroom: <time datetime="YYYY-M-D">...</time> immediately
+            # followed by the headline link.
+            "url": "https://www.mom.gov.sg/newsroom",
+            "base": "https://www.mom.gov.sg",
+            "item_pattern": re.compile(
+                r'<time[^>]*datetime="(?P<date>\d{4}-\d{1,2}-\d{1,2})"[^>]*>.*?'
+                r'<a\s+href="(?P<link>[^"]+)"[^>]*>(?P<title>[^<]+)</a>',
+                re.S,
+            ),
+            "date_format": "%Y-%m-%d",
+        },
+        {
+            # IRAS latest-updates: <article class="eyd-article-item ..."> block
+            # with a <h3><a href=...>Title</a></h3> and a "DD Mon YYYY" date span.
+            "url": "https://www.iras.gov.sg/latest-updates",
+            "base": "https://www.iras.gov.sg",
+            "item_pattern": re.compile(
+                r'<article class="eyd-article-item[^"]*">\s*'
+                r'<section class="eyd-article-item__text">\s*'
+                r'<h3><a href=["\']?(?P<link>[^"\'>]+)["\']?>(?P<title>[^<]+)</a></h3>.*?'
+                r'meta--date">(?P<date>[^<]+)</span>',
+                re.S,
+            ),
+            "date_format": "%d %b %Y",
+        },
+        {
+            # MOF SG newsroom: <a href="/news-resources/newsroom/...">, a date
+            # paragraph, then the title in a <span class="line-clamp-3">.
+            "url": "https://www.mof.gov.sg/news-resources/newsroom/",
+            "base": "https://www.mof.gov.sg",
+            "item_pattern": re.compile(
+                r'<a[^>]*href="(?P<link>/news-resources/newsroom/[^"]+)"[^>]*>\s*'
+                r'<p[^>]*>(?P<date>\d{1,2}\s+\w+\s+\d{4})</p>.*?'
+                r'<span class="line-clamp-3"[^>]*>(?P<title>[^<]+)</span>',
+                re.S,
+            ),
+            "date_format": "%d %B %Y",
+        },
+    ],
+    "🇲🇾↔️🇸🇬 Cross-border life": [
+        {
+            # LTA newsroom is a full archive back to 2020, oldest-first in the
+            # HTML — the hidden <span class="date"> ISO string is what we sort
+            # on; fetch_web re-sorts by date so ordering here doesn't matter.
+            "url": "https://www.lta.gov.sg/content/ltagov/en/newsroom.html",
+            "base": "https://www.lta.gov.sg",
+            "item_pattern": re.compile(
+                r'<h5[^>]*>\s*<a href="(?P<link>[^"]+)"[^>]*>(?P<title>[^<]+)</a>\s*</h5>.*?'
+                r'<span class="date"[^>]*>(?P<date>\d{4}-\d{1,2}-\d{1,2})</span>',
+                re.S,
+            ),
+            "date_format": "%Y-%m-%d",
+        },
+    ],
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -373,6 +451,80 @@ def classify_topic(title, summary):
     return best_topic
 
 
+def fetch_web(candidates, seen):
+    """Scrape the Tier 1 sources with no working RSS/Atom feed (WEB_SOURCES),
+    appending onto the shared `candidates` list and `seen` dedup set used by
+    fetch_rss. Returns (stale_count, undated_count) for the combined log line.
+
+    Sites list their archive in whatever order they please — some newest-first
+    (MOM, IRAS, MOF SG), some oldest-first (LTA, whose page is a full archive
+    back to 2020). So every match is parsed and sorted by date before capping
+    to the most recent N, rather than trusting "the first matches in the HTML
+    are the newest ones."
+    """
+    headers = {"User-Agent": "MY-SG-News-Bot/2.0 (+web reader)"}
+    stale_count, undated_count = 0, 0
+    for section, sources in WEB_SOURCES.items():
+        for cfg in sources:
+            url = cfg["url"]
+            try:
+                logger.info("Scraping: %s", url)
+                response = requests.get(url, headers=headers, timeout=25)
+                response.raise_for_status()
+                body = response.text
+                source_name = urlsplit(url).netloc.lower().removeprefix("www.")
+                tier = source_tier(url)
+
+                parsed_items = []
+                for match in cfg["item_pattern"].finditer(body):
+                    title = clean_text(html.unescape(match.group("title")), 240)
+                    link = urljoin(cfg["base"], match.group("link").strip())
+                    if not title:
+                        continue
+                    try:
+                        published_at = datetime.strptime(
+                            match.group("date").strip(), cfg["date_format"]
+                        ).replace(tzinfo=SG_TIME)
+                    except ValueError:
+                        undated_count += 1
+                        continue
+                    parsed_items.append((published_at, title, link))
+                parsed_items.sort(key=lambda item: item[0], reverse=True)
+
+                added = 0
+                for published_at, title, link in parsed_items:
+                    if added >= 12:
+                        break
+                    key = canonical_url(link)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if not is_fresh_article(published_at):
+                        stale_count += 1
+                        continue
+                    score, matched = relevance_score(
+                        title, "", published_at, source_country_context(url), tier
+                    )
+                    if score < MIN_RELEVANCE_SCORE:
+                        continue
+                    added += 1
+                    candidates.append({
+                        "section": section,
+                        "topic": classify_topic(title, ""),
+                        "title": title,
+                        "link": link,
+                        "summary": "",
+                        "source": source_name,
+                        "tier": tier,
+                        "score": score,
+                        "matched": matched,
+                        "published_at": published_at.isoformat(),
+                    })
+            except Exception as exc:
+                logger.warning("Web scrape failed (%s): %s", url, exc)
+    return stale_count, undated_count
+
+
 def fetch_rss():
     candidates, seen = [], set()
     stale_count, undated_count = 0, 0
@@ -422,6 +574,10 @@ def fetch_rss():
                     })
             except Exception as exc:
                 logger.warning("RSS failed (%s): %s", url, exc)
+
+    web_stale, web_undated = fetch_web(candidates, seen)
+    stale_count += web_stale
+    undated_count += web_undated
 
     candidates.sort(key=lambda item: item["score"], reverse=True)
     selected, source_counts = [], {}
