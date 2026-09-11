@@ -27,11 +27,16 @@ BOT_MODE = os.getenv("BOT_MODE", "external")   # "internal" or "external"
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "30"))
-FINAL_COUNT = int(os.getenv("FINAL_COUNT", "5"))
+# Internal has no editorial cap (see generate_internal_prompt) — this is only a
+# safety valve against a malformed/runaway model response, not a target count.
+INTERNAL_SAFETY_CAP = int(os.getenv("INTERNAL_SAFETY_CAP", "20"))
+EXTERNAL_MAX_STORIES = int(os.getenv("EXTERNAL_MAX_STORIES", "3"))
 MIN_RELEVANCE_SCORE = int(os.getenv("MIN_RELEVANCE_SCORE", "5"))
 MAX_ARTICLE_AGE_HOURS = int(os.getenv("MAX_ARTICLE_AGE_HOURS", "36"))
 MONDAY_MAX_ARTICLE_AGE_HOURS = int(os.getenv("MONDAY_MAX_ARTICLE_AGE_HOURS", "72"))
 MAX_ARTICLES_PER_SOURCE = 5
+FX_MEANINGFUL_MOVE_PCT = float(os.getenv("FX_MEANINGFUL_MOVE_PCT", "0.5"))
+FX_EXAMPLE_MYR_AMOUNT = 5000
 
 # Feeds are intentionally local and practical. Broad global-market and crypto feeds
 # were removed because they produced stories with no clear cross-border money decision.
@@ -182,6 +187,15 @@ GLOBAL_MARKET_TERMS = (
     "wall street", "nasdaq", "s&p 500", "dow jones", "bitcoin", "crypto",
     "federal reserve", "oil prices", "gold prices", "global stocks",
 )
+# Boss's explicit downrank list: corporate/market noise that isn't a household
+# decision for this audience, even when it technically mentions MY/SG.
+DOWNRANK_TERMS = (
+    "ceo appointment", "appointed as group ceo", "appointed as ceo",
+    "quarterly earnings", "full-year results", "q1 results", "q2 results",
+    "q3 results", "q4 results", "ipo", "initial public offering",
+    "credit card promotion", "cashback promotion", "sign-up bonus",
+    "welcome bonus", "cabinet reshuffle", "by-election", "merger and acquisition",
+)
 
 MALAYSIA_SOURCE_HOSTS = (
     "malaymail.com", "bernama.com", "thestar.com.my", "ringgitplus.com",
@@ -196,6 +210,24 @@ SINGAPORE_SOURCE_HOSTS = (
     "hrmasia.com", "mom.gov.sg", "iras.gov.sg", "mof.gov.sg",
     "singstat.gov.sg", "ica.gov.sg", "lta.gov.sg", "ura.gov.sg",
     "omny.fm",
+)
+
+# Boss's source hierarchy: Tier 1 (official/primary) > Tier 2 (established media)
+# > Tier 3 (audience angles / personal finance / commentary). Unlisted sources
+# (e.g. HRMASIA, URA) get no tier boost but aren't excluded.
+TIER1_HOSTS = (
+    "mom.gov.sg", "iras.gov.sg", "ica.gov.sg", "lta.gov.sg", "singstat.gov.sg",
+    "mof.gov.sg", "bnm.gov.my", "dosm.gov.my", "kwsp.gov.my", "hasil.gov.my",
+    "mof.gov.my", "mot.gov.my", "jpj.gov.my",
+)
+TIER2_HOSTS = (
+    "channelnewsasia.com", "businesstimes.com.sg", "bernama.com",
+    "thestar.com.my", "malaymail.com", "theedgemalaysia.com",
+)
+TIER3_HOSTS = (
+    "bfm.my", "omny.fm", "omnycontent.com", "moneysmart.sg", "seedly.sg",
+    "dollarsandsense.sg", "ringgitplus.com", "imoney.my", "ringgitohringgit.com",
+    "mothership.sg", "propertyguru.com.my", "edgeprop.my",
 )
 
 TOPIC_RULES = {
@@ -264,7 +296,7 @@ def is_fresh_article(published_at):
     return published_at is not None and article_age_hours(published_at) <= freshness_limit_hours()
 
 
-def relevance_score(title, summary, published_at=None, country_context=None):
+def relevance_score(title, summary, published_at=None, country_context=None, tier=None):
     text = (title + " " + summary).lower()
     score = 0
     matched = []
@@ -284,8 +316,16 @@ def relevance_score(title, summary, published_at=None, country_context=None):
         score += 3
     if any(contains_term(text, term) for term in GLOBAL_MARKET_TERMS) and not (has_my or has_sg):
         score -= 8
+    if any(contains_term(text, term) for term in DOWNRANK_TERMS):
+        score -= 5
     if not has_my and not has_sg:
         score -= 4
+
+    if tier == 1:
+        score += 6
+        matched.append("Tier 1 source")
+    elif tier == 2:
+        score += 2
 
     if published_at:
         age_hours = article_age_hours(published_at)
@@ -305,6 +345,21 @@ def source_country_context(url):
     # This Omny playlist is BFM 89.9's Malaysian Ringgit & Sense programme.
     if host == "omnycontent.com":
         return "malaysia"
+    return None
+
+
+def source_tier(url):
+    host = urlsplit(url).netloc.lower().removeprefix("www.")
+
+    def matches(hosts):
+        return any(host == item or host.endswith("." + item) for item in hosts)
+
+    if matches(TIER1_HOSTS):
+        return 1
+    if matches(TIER2_HOSTS):
+        return 2
+    if matches(TIER3_HOSTS):
+        return 3
     return None
 
 
@@ -332,6 +387,7 @@ def fetch_rss():
                 if feed.bozo and not feed.entries:
                     raise ValueError(str(feed.bozo_exception))
                 source = clean_text(feed.feed.get("title", "Unknown"), 80)
+                tier = source_tier(url)
                 for entry in feed.entries[:12]:
                     title = clean_text(entry.get("title", ""), 240)
                     link = entry.get("link", "").strip()
@@ -348,7 +404,7 @@ def fetch_rss():
                         stale_count += 1
                         continue
                     score, matched = relevance_score(
-                        title, summary, published_at, source_country_context(url)
+                        title, summary, published_at, source_country_context(url), tier
                     )
                     if score < MIN_RELEVANCE_SCORE:
                         continue
@@ -359,6 +415,7 @@ def fetch_rss():
                         "link": link,
                         "summary": summary,
                         "source": source,
+                        "tier": tier,
                         "score": score,
                         "matched": matched,
                         "published_at": published_at.isoformat() if published_at else "",
@@ -382,6 +439,45 @@ def fetch_rss():
         len(selected), stale_count, undated_count, freshness_limit_hours(),
     )
     return selected
+
+
+def fetch_fx_move():
+    """SGD/MYR spot rate + 7-day move, for the external channel's FX Radar block."""
+    try:
+        today = requests.get(
+            "https://api.frankfurter.app/latest",
+            params={"from": "SGD", "to": "MYR"},
+            timeout=15,
+        )
+        today.raise_for_status()
+        rate_now = today.json()["rates"]["MYR"]
+
+        week_ago_date = (NOW - timedelta(days=7)).strftime("%Y-%m-%d")
+        hist = requests.get(
+            f"https://api.frankfurter.app/{week_ago_date}",
+            params={"from": "SGD", "to": "MYR"},
+            timeout=15,
+        )
+        hist.raise_for_status()
+        rate_week_ago = hist.json()["rates"]["MYR"]
+
+        pct_move = (rate_now - rate_week_ago) / rate_week_ago * 100
+        return {
+            "rate": rate_now,
+            "pct_move": pct_move,
+            "cost_now": FX_EXAMPLE_MYR_AMOUNT / rate_now,
+            "cost_week_ago": FX_EXAMPLE_MYR_AMOUNT / rate_week_ago,
+        }
+    except Exception as exc:
+        logger.warning("FX fetch failed: %s", exc)
+        return None
+
+
+def should_show_fx(fx):
+    """Surface FX when the move is meaningful, or as a lightweight weekly (Monday) update."""
+    if not fx:
+        return False
+    return abs(fx["pct_move"]) >= FX_MEANINGFUL_MOVE_PCT or WEEKDAY == 0
 
 
 def call_groq(prompt, max_tokens=3500, retries=3):
@@ -433,128 +529,98 @@ def extract_json(text):
 def news_for_prompt(news_list):
     blocks = []
     for n in news_list:
+        tier_label = f"Tier {n['tier']}" if n.get("tier") else "unlisted tier"
         blocks.append(
-            f"ID {n['id']} | score {n['score']} | {n['topic']} | {n['source']}\n"
+            f"ID {n['id']} | score {n['score']} | {n['topic']} | {n['source']} ({tier_label})\n"
             f"Title: {n['title']}\nSummary: {n['summary']}\n"
             f"Signals: {', '.join(n['matched'])}"
         )
     return "\n\n".join(blocks)
 
 
-# ── FIX 3 & 4: Separate prompts per mode ─────────────────────────────────────
+# ── Internal prompt: PYTCH Internal Content Radar spec ───────────────────────
 
 def generate_internal_prompt(news_list):
-    """Internal team prompt: focus on content opportunity for PYTCH creators."""
-    return f"""You are the bilingual editor and content strategist for PYTCH. Your exact audience is Malaysians aged roughly 20-45 who work in Singapore, including daily commuters and people living in Singapore.
+    return f"""You are the PYTCH content strategist reviewing today's vetted MY-SG candidate stories for the internal team. You are not a general finance news summariser — your only question is "Should PYTCH make content about this?"
 
-Today is {TODAY_STR_EN}. Choose exactly {min(FINAL_COUNT, len(news_list))} stories from the vetted candidates below.
+Today is {TODAY_STR_EN}.
 
-Internal editorial test: for each story, ask "Can this become a strong PYTCH content idea that hits a real cross-border pain point for Malaysians working in Singapore?"
+Core audience: Malaysians aged roughly 23-35 who currently work in Singapore, are considering moving to Singapore for work, earn SGD while managing commitments in Malaysia, may eventually return to Malaysia, or are making financial/life decisions across both countries.
 
-Rules:
-- Prioritise stories with the strongest content opportunity: SGD/MYR, remittance, salaries, jobs and passes, tax, CPF/EPF, rent/property, cost of living, banking, insurance/healthcare, Causeway/RTS/JS-SEZ.
-- Reject generic global markets, company earnings, crypto and investment-price updates unless there is a concrete MY-SG household consequence.
-- Prefer a useful mix of topics and no more than two stories on the same topic.
-- Use only candidate IDs. Never invent facts, URLs, numbers or policy details.
-- 'decision' must be a specific action or question for the audience, not generic investment advice.
-- 'content_angle' should be a practical PYTCH explainer, calculator, checklist, comparison, myth-buster or audience poll — be specific and creative.
+Apply the Mandatory PYTCH Content Test to every candidate:
+1. Would a Malaysian working in Singapore genuinely care?
+2. Does this affect their money, job, cost of living or major life decisions?
+3. Is the MY/SG connection direct?
+4. Is there a real audience tension or decision?
+5. Can this become useful or engaging PYTCH content?
+6. Is there a reason to cover it now?
+7. Is the source reliable enough? Weight Tier 1 official sources highest, verify Tier 2 major policy claims against Tier 1 where possible, and use Tier 3 mainly for audience angles/pain points — never as primary evidence for a major policy claim.
+8. Is this better than the other stories available today?
 
-Candidates:
-{news_for_prompt(news_list)}
+If the answer is weak on any of these, skip the story entirely — do not include it in your output.
 
-Return ONLY valid JSON:
-{{
-  "intro_en": "one-sentence opening for the team briefing",
-  "news": [
-    {{
-      "source_id": 1,
-      "tag_en": "emoji + English topic",
-      "title_en": "English headline",
-      "why_en": "why this specifically matters to Malaysians working in Singapore",
-      "decision_en": "✅ one concrete decision/question",
-      "content_angle_en": "🎬 PYTCH content opportunity — specific format and angle"
-    }}
-  ],
-  "outro_en": "short internal note or editorial observation"
-}}"""
+Classify every story you keep as exactly one of:
+- "🔥 TIMELY" — strong opportunity, ideally actioned within 24-72 hours
+- "💡 EVERGREEN" — strong audience pain point/decision, no immediate urgency
+- "👀 WATCH" — potentially important, but needs more information or confirmation
 
+Actively downrank/drop unless there's a clear, direct MY→SG audience impact: US stock movements, random individual SG/MY stock movements, crypto price movements, global M&A, company earnings, Wall Street commentary, generic investment outlooks, CEO appointments, corporate press releases, general business news, political news with no direct audience impact, lifestyle stories with no money/work/cross-border relevance. Do not force a MY→SG angle onto weak stories.
 
-def generate_external_prompt(news_list):
-    """External audience prompt: bilingual, focus on relevance and actionability."""
-    return f"""You are the bilingual editor and content strategist for PYTCH. Your exact audience is Malaysians aged roughly 20-45 who work in Singapore, including daily commuters and people living in Singapore.
+There is no required minimum or maximum number of stories. Include every story that genuinely clears the Mandatory PYTCH Content Test, and none that don't — most days that means 1-4 stories. If you find yourself regularly returning more than 6-8, you are being too generous: tighten the bar rather than padding the list. One genuinely strong opportunity is better than five mediocre ideas.
 
-Today is {TODAY_STR_EN}. Choose exactly {min(FINAL_COUNT, len(news_list))} stories from the vetted candidates below.
-
-Editorial test: every selected story must answer, 'Is this relevant to Malaysians working in Singapore, and what money, career, housing, tax, banking, protection, or commuting decision does it create?'
-
-Rules:
-- Prioritise direct Malaysia-Singapore consequences: SGD/MYR, remittance, salaries, jobs and passes, tax, CPF/EPF, rent/property, cost of living, banking, insurance/healthcare, Causeway/RTS/JS-SEZ.
-- Reject generic global markets, company earnings, crypto and investment-price updates unless the candidate has a concrete MY-SG household consequence.
-- Prefer a useful mix of topics and no more than two stories on the same topic.
-- Use only candidate IDs. Never invent facts, URLs, numbers or policy details.
-- 'decision' must be a specific action or question for the audience, not generic investment advice.
-- Use natural Simplified Chinese and Malaysian/Singaporean English. Keep every field concise.
+For each story you keep:
+- "story" explains what happened in one sentence.
+- "audience_tension" must be the actual thought, fear, frustration or decision behind it — written as the audience's own inner voice (e.g. "I'm earning S$4K now, but can I actually afford to stop renting a room?"), never a generic description like "Rental affordability remains a concern."
+- "why_it_matters" explains the direct MY→SG impact.
+- "why_now" explains the urgency; if there is none, say plainly that it's evergreen.
+- "pytch_angle" suggests one strong hook, question or framing, starting from the audience tension — do not automatically default to a calculator/checklist/explainer unless that's genuinely the strongest format.
+- "best_format" must be exactly one of: "Timely Reel" (fast-moving news, one clear implication), "Carousel" (comparisons, step-by-step decisions, multiple implications or numbers), "Street Cents" (the audience itself has an interesting opinion/behaviour/decision to reveal), "Expert Reacts" (needs interpretation from a specialist), "FOMO FIX" (a larger life/financial decision with multiple trade-offs), or "Tool / Calculator / Guide" (only when the audience genuinely benefits from calculating or completing something).
+- "audience_relevance", "content_potential" and "priority" must each be exactly "High", "Medium" or "Low".
+- Use only candidate IDs below. Never invent facts, URLs, numbers or policy details.
 
 Candidates:
 {news_for_prompt(news_list)}
 
 Return ONLY valid JSON:
 {{
-  "intro_zh": "one-sentence opening",
-  "intro_en": "one-sentence opening",
   "news": [
     {{
       "source_id": 1,
-      "tag_zh": "emoji + Chinese topic",
-      "tag_en": "emoji + English topic",
-      "title_zh": "Chinese headline",
-      "title_en": "English headline",
-      "why_zh": "why this specifically matters to Malaysians working in Singapore",
-      "why_en": "why this specifically matters to Malaysians working in Singapore",
-      "decision_zh": "✅ one concrete decision/question",
-      "decision_en": "✅ one concrete decision/question"
+      "classification": "🔥 TIMELY",
+      "topic": "short topic label",
+      "story": "what happened, in one sentence",
+      "audience_tension": "the audience's actual thought, worry or decision",
+      "why_it_matters": "the direct MY→SG impact",
+      "why_now": "the urgency, or a note that this is evergreen",
+      "pytch_angle": "one strong hook, question or framing",
+      "best_format": "Timely Reel",
+      "audience_relevance": "High",
+      "content_potential": "High",
+      "priority": "High"
     }}
-  ],
-  "outro_zh": "short informational disclaimer",
-  "outro_en": "short informational disclaimer"
-}}"""
+  ]
+}}
+If nothing clears the bar today, return {{"news": []}}."""
 
 
 def hydrate_internal(data, news_list):
-    """Validate and hydrate internal (English-only) daily data."""
-    lookup = {n["id"]: n for n in news_list}
-    clean_items, used = [], set()
-    if not isinstance(data, dict) or not isinstance(data.get("news"), list):
-        return None
-    required = ("tag_en", "title_en", "why_en", "decision_en", "content_angle_en")
-    for item in data["news"]:
-        try:
-            source_id = int(item.get("source_id"))
-        except (TypeError, ValueError):
-            continue
-        source = lookup.get(source_id)
-        if not source or source_id in used or not all(item.get(key) for key in required):
-            continue
-        used.add(source_id)
-        item["link"] = source["link"]
-        item["source"] = source["source"]
-        clean_items.append(item)
-    if not clean_items:
-        return None
-    data["news"] = clean_items[:FINAL_COUNT]
-    return data
-
-
-def hydrate_external(data, news_list):
-    """Validate and hydrate external (bilingual) daily data."""
+    """Validate and hydrate the internal PYTCH Content Radar output. An empty
+    but well-formed 'news' array is valid — it means nothing cleared the bar."""
     lookup = {n["id"]: n for n in news_list}
     clean_items, used = [], set()
     if not isinstance(data, dict) or not isinstance(data.get("news"), list):
         return None
     required = (
-        "tag_zh", "tag_en", "title_zh", "title_en",
-        "why_zh", "why_en", "decision_zh", "decision_en",
+        "classification", "topic", "story", "audience_tension", "why_it_matters",
+        "why_now", "pytch_angle", "best_format", "audience_relevance",
+        "content_potential", "priority",
     )
+    allowed_classifications = {"🔥 TIMELY", "💡 EVERGREEN", "👀 WATCH"}
+    allowed_formats = {
+        "Timely Reel", "Carousel", "Street Cents", "Expert Reacts",
+        "FOMO FIX", "Tool / Calculator / Guide",
+    }
+    allowed_levels = {"High", "Medium", "Low"}
     for item in data["news"]:
         try:
             source_id = int(item.get("source_id"))
@@ -563,13 +629,105 @@ def hydrate_external(data, news_list):
         source = lookup.get(source_id)
         if not source or source_id in used or not all(item.get(key) for key in required):
             continue
+        if item["classification"] not in allowed_classifications:
+            continue
+        if item["best_format"] not in allowed_formats:
+            continue
+        if not {item["audience_relevance"], item["content_potential"], item["priority"]} <= allowed_levels:
+            continue
+        used.add(source_id)
+        item["link"] = source["link"]
+        item["source"] = source["source"]
+        item["tier"] = source["tier"]
+        clean_items.append(item)
+    data["news"] = clean_items[:INTERNAL_SAFETY_CAP]
+    return data
+
+
+# ── External prompt: PYTCH MY→SG Radar spec ──────────────────────────────────
+
+def generate_external_prompt(news_list):
+    return f"""You are curating today's PYTCH MY→SG Radar — a Telegram channel for Malaysians working in Singapore. This is a filter, not a feed: choose at most {EXTERNAL_MAX_STORIES} genuinely useful stories, fewer or zero is fine. One strong update beats several loosely related ones.
+
+Today is {TODAY_STR_EN}.
+
+Core audience: Malaysians aged roughly 23-35 who currently work in Singapore, earn SGD, send money or maintain financial commitments in Malaysia, rent or live in Singapore, commute between Malaysia and Singapore, are considering PR/citizenship/returning home, or manage savings, insurance, family or property across both countries.
+
+Priority topics: Your SGD (SGD/MYR, remittance, transfer costs, notable FX movement, BNM/MAS developments that affect SGD/MYR), Your Work (salary, employment, hiring, retrenchment, EP/S Pass/work permit rules, employment rights, side-hustle rules), Your Costs (rent, housing, food, transport, JB-SG commuting, cost-of-living changes), Your Money (income tax, CPF/EPF, savings, banking, insurance, healthcare, debt, relevant investing rules), Your Life Back Home (property, family support, loans, parents, children, healthcare, marriage, retirement, returning to Malaysia, MY financial commitments).
+
+Before choosing a story, ask:
+1. Would a Malaysian working in Singapore genuinely care?
+2. Does this directly affect their money, job or everyday life?
+3. Is there a financial or practical consequence?
+4. Is the MY/SG connection genuine?
+5. Is this relevant now?
+6. Can the impact be explained clearly in one or two sentences?
+7. Is the source credible? Weight Tier 1 official sources highest, verify Tier 2 major claims against Tier 1 where possible, and use Tier 3 mainly for evergreen pain-point angles.
+8. Is this important enough to justify a Telegram notification?
+
+If the answer to any is not clearly yes, skip it. Do not publish unless there is a direct audience impact — drop: US stock movements, random SG/MY stock news, crypto prices, global M&A, company earnings, Wall Street commentary, generic investment outlooks, CEO appointments, corporate press releases, general business news, weak political stories, generic personal-finance advice, promotional bank or credit-card content. Never include a story just because it contains the words Singapore, Malaysia or money.
+
+Classify each story you keep as exactly one of:
+- "🚨 WHAT CHANGED" — a genuine development: policy, tax, work-pass rules, FX, transport, employment, rent, banking, healthcare, CPF/EPF, regulatory or cross-border travel/commuting change
+- "💡 WORTH KNOWING" — a highly useful evergreen MY→SG pain point; never present this as breaking news
+
+Aim for roughly 70% timely WHAT CHANGED and 30% WORTH KNOWING over time, but never force either, and never force a fixed count.
+
+For each story:
+- "hook" is a short, audience-facing hook with one emoji, understandable in a few seconds.
+- "one_liner" explains what changed, or what's worth knowing, in one sentence.
+- "why_you_care" is one sentence on the direct effect on Malaysians working in Singapore.
+- "action" is either a genuine, specific practical action the story supports, or exactly "No action needed for now." or "Worth watching if this applies to you." if there's nothing concrete to do. Never force advice to negotiate salary, switch accounts, refinance debt, convert currencies, prepare documents, or buy/sell investments unless the story itself gives a clear reason to.
+- Write short, conversational, practical, neutral, specific, non-alarmist language — like explaining it to someone checking Telegram on the MRT. Avoid jargon like "broader implications for wage expectations"; prefer plain statements, including "this doesn't directly change X, so we're skipping it" style framing where useful. Do not exaggerate relevance.
+- Give both "_en" (natural Malaysian/Singaporean English) and "_zh" (natural Simplified Chinese) versions of every text field.
+- Use only candidate IDs below. Never invent facts, URLs, numbers or policy details.
+
+Candidates:
+{news_for_prompt(news_list)}
+
+Return ONLY valid JSON:
+{{
+  "posts": [
+    {{
+      "source_id": 1,
+      "classification": "🚨 WHAT CHANGED",
+      "hook_zh": "...", "hook_en": "...",
+      "one_liner_zh": "...", "one_liner_en": "...",
+      "why_you_care_zh": "...", "why_you_care_en": "...",
+      "action_zh": "...", "action_en": "..."
+    }}
+  ]
+}}
+If nothing today clears the bar, return {{"posts": []}}."""
+
+
+def hydrate_external(data, news_list):
+    """Validate and hydrate the external MY→SG Radar output. An empty but
+    well-formed 'posts' array is valid — it means nothing cleared the bar."""
+    lookup = {n["id"]: n for n in news_list}
+    clean_items, used = [], set()
+    if not isinstance(data, dict) or not isinstance(data.get("posts"), list):
+        return None
+    required = (
+        "classification", "hook_zh", "hook_en", "one_liner_zh", "one_liner_en",
+        "why_you_care_zh", "why_you_care_en", "action_zh", "action_en",
+    )
+    allowed_classifications = {"🚨 WHAT CHANGED", "💡 WORTH KNOWING"}
+    for item in data["posts"]:
+        try:
+            source_id = int(item.get("source_id"))
+        except (TypeError, ValueError):
+            continue
+        source = lookup.get(source_id)
+        if not source or source_id in used or not all(item.get(key) for key in required):
+            continue
+        if item["classification"] not in allowed_classifications:
+            continue
         used.add(source_id)
         item["link"] = source["link"]
         item["source"] = source["source"]
         clean_items.append(item)
-    if not clean_items:
-        return None
-    data["news"] = clean_items[:FINAL_COUNT]
+    data["posts"] = clean_items[:EXTERNAL_MAX_STORIES]
     return data
 
 
@@ -582,56 +740,104 @@ Return ONLY valid JSON:
 {{"themes":[{{"emoji":"💱","title_zh":"主题","title_en":"Theme","desc_zh":"具体影响","desc_en":"Concrete impact"}}],"watch_zh":"下周留意的决定","watch_en":"Decision to watch next week","content_zh":"下周最值得制作的PYTCH内容","content_en":"Best PYTCH content opportunity for next week"}}"""
 
 
-# ── FIX 3: Internal format — English only, includes content_angle ─────────────
+# ── Internal format: PYTCH Internal Content Radar output spec ────────────────
 
 def format_internal(data):
-    lines = [
-        "🔒 PYTCH Internal | Content Radar · " + TODAY_STR_EN,
-        "─" * 22,
-        "",
-        data.get("intro_en", ""),
-        "",
-    ]
-    for item in data["news"]:
+    news_items = data.get("news", [])
+    lines = ["🔒 PYTCH Internal | Content Radar · " + TODAY_STR_EN, "─" * 22, ""]
+    if not news_items:
+        lines.append("No strong MY→SG content opportunities today.")
+        return "\n".join(lines)
+    for item in news_items:
+        tier_label = f"Tier {item['tier']}" if item.get("tier") else "unlisted source"
         lines.extend([
-            item["tag_en"],
-            "📰 " + item["title_en"],
-            "📝 " + item["why_en"],
-            item["decision_en"],
-            item["content_angle_en"],
+            f"{item['classification']} | {item['topic']}",
+            "",
+            "📰 Story",
+            item["story"],
+            "",
+            "🔎 Source",
+            f"{item['source']} ({tier_label})",
+            "",
+            "🧠 Audience tension",
+            item["audience_tension"],
+            "",
+            "📌 Why it matters",
+            item["why_it_matters"],
+            "",
+            "⏰ Why now",
+            item["why_now"],
+            "",
+            "🎬 PYTCH angle",
+            item["pytch_angle"],
+            "",
+            "🎞️ Best format: " + item["best_format"],
+            f"📊 Audience relevance: {item['audience_relevance']} | "
+            f"Content potential: {item['content_potential']} | "
+            f"Priority: {item['priority']}",
+            "",
             "🔗 " + item["link"],
             "",
         ])
-    lines.append(data.get("outro_en", "Internal use only."))
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
-# ── FIX 3: External format — bilingual, NO content_angle ─────────────────────
+def format_fx_block(fx, zh):
+    move_str = f"{'+' if fx['pct_move'] >= 0 else ''}{fx['pct_move']:.1f}%"
+    diff = fx["cost_week_ago"] - fx["cost_now"]
+    amount = FX_EXAMPLE_MYR_AMOUNT
+    if zh:
+        header, rate_line, move_line = "💱 新马汇率速览", f"S$1 = RM{fx['rate']:.2f}", f"7天变动：{move_str}"
+        if abs(diff) < 1:
+            meaning = "过去一周变动不大，现在汇款回家和一周前差别不大。"
+        elif diff > 0:
+            meaning = f"现在汇RM{amount:,}回家，比一周前大约便宜S${abs(diff):.0f}。"
+        else:
+            meaning = f"现在汇RM{amount:,}回家，比一周前大约贵S${abs(diff):.0f}。"
+        meaning_label = "📌 这代表什么"
+    else:
+        header, rate_line, move_line = "💱 SGD/MYR Radar", f"S$1 = RM{fx['rate']:.2f}", f"7-day move: {move_str}"
+        if abs(diff) < 1:
+            meaning = "Not much movement this week — sending money home costs about the same as a week ago."
+        elif diff > 0:
+            meaning = f"Sending RM{amount:,} home today would cost around S${abs(diff):.0f} less than a week ago."
+        else:
+            meaning = f"Sending RM{amount:,} home today would cost around S${abs(diff):.0f} more than a week ago."
+        meaning_label = "📌 What it means"
+    return "\n".join([header, rate_line, move_line, "", meaning_label, meaning])
 
-def format_external(data, language):
+
+def format_external(data, fx, language):
     zh = language == "zh"
-    lines = [
-        ("🇨🇳 中文版 | 🇲🇾→🇸🇬 跨境钱事 · " + TODAY_STR) if zh
-        else ("🇬🇧 English | 🇲🇾→🇸🇬 Cross-Border Money Brief · " + TODAY_STR_EN),
-        "─" * 22,
-        "",
-        data.get("intro_zh" if zh else "intro_en", ""),
-        "",
-    ]
     suffix = "zh" if zh else "en"
-    for item in data["news"]:
+    header = ("🇨🇳 中文版 | PYTCH MY→SG Radar · " + TODAY_STR) if zh else ("🇬🇧 English | PYTCH MY→SG Radar · " + TODAY_STR_EN)
+    show_fx = should_show_fx(fx)
+    posts = data.get("posts", []) if data else []
+
+    if not posts and not show_fx:
+        return None  # Nothing meaningful today — no filler, no message sent.
+
+    lines = [header, "─" * 22, ""]
+    if show_fx:
+        lines.append(format_fx_block(fx, zh))
+        lines.append("")
+    for item in posts:
         lines.extend([
-            item[f"tag_{suffix}"],
-            "📰 " + item[f"title_{suffix}"],
-            "📝 " + item[f"why_{suffix}"],
-            item[f"decision_{suffix}"],
-            # NOTE: content_angle intentionally omitted — internal only
-            "🔗 " + item["link"],
+            item["classification"] + " " + item[f"hook_{suffix}"],
+            "",
+            item[f"one_liner_{suffix}"],
+            "",
+            ("💭 你为什么要关心" if zh else "💭 Why you care:"),
+            item[f"why_you_care_{suffix}"],
+            "",
+            item[f"action_{suffix}"],
+            "",
+            ("🔗 来源：" if zh else "🔗 Source: ") + item["source"],
             "",
         ])
     fallback = "💡 仅供参考，不构成财务、税务或移民建议。" if zh else "💡 For information only; not financial, tax or immigration advice."
-    lines.append(data.get("outro_zh" if zh else "outro_en", fallback))
-    return "\n".join(lines)
+    lines.append(fallback)
+    return "\n".join(lines).rstrip()
 
 
 def format_weekly(data):
@@ -703,23 +909,27 @@ def send_telegram(message):
 def main():
     logger.info("Starting MY-SG news scan for %s (mode: %s)", TODAY_STR_EN, BOT_MODE)
     raw_news = fetch_rss()
-    if not raw_news:
-        logger.error("No stories met the MY-SG relevance threshold")
-        return False
 
     if BOT_MODE == "internal":
-        # Internal channel: English only, includes content angles for the PYTCH team
-        daily = hydrate_internal(
-            extract_json(call_groq(generate_internal_prompt(raw_news))),
-            raw_news,
-        )
-        if not daily:
-            logger.error("Internal daily brief generation or validation failed")
-            return False
-        ok = send_telegram(format_internal(daily))
+        # Internal channel: English only, classified TIMELY/EVERGREEN/WATCH,
+        # includes content angles for the PYTCH team. No candidates or nothing
+        # clearing the editorial bar both mean "no opportunities today" — that's
+        # a valid, expected daily state, not a failure.
+        if not raw_news:
+            logger.info("No candidates cleared the relevance threshold")
+            ok = send_telegram(format_internal({"news": []}))
+        else:
+            daily = hydrate_internal(
+                extract_json(call_groq(generate_internal_prompt(raw_news))),
+                raw_news,
+            )
+            if daily is None:
+                logger.error("Internal daily brief generation or validation failed")
+                return False
+            ok = send_telegram(format_internal(daily))
 
         # Friday weekly content radar (internal only)
-        if WEEKDAY == 4:
+        if WEEKDAY == 4 and raw_news:
             weekly = extract_json(call_groq(generate_weekly_prompt(raw_news), max_tokens=1800))
             if weekly:
                 time.sleep(2)
@@ -729,17 +939,29 @@ def main():
                 ok = False
 
     else:
-        # External channel: bilingual (Chinese then English), no content angles
-        daily = hydrate_external(
-            extract_json(call_groq(generate_external_prompt(raw_news))),
-            raw_news,
-        )
-        if not daily:
-            logger.error("External daily brief generation or validation failed")
-            return False
-        ok = send_telegram(format_external(daily, "zh"))
-        time.sleep(2)
-        ok = send_telegram(format_external(daily, "en")) and ok
+        # External channel: bilingual (Chinese then English), FX Radar + up to
+        # EXTERNAL_MAX_STORIES posts. A quiet day sends nothing — "no filler."
+        fx = fetch_fx_move()
+        daily = {"posts": []}
+        if raw_news:
+            hydrated = hydrate_external(
+                extract_json(call_groq(generate_external_prompt(raw_news))),
+                raw_news,
+            )
+            if hydrated is None:
+                logger.warning("External story selection failed; continuing with FX-only update")
+            else:
+                daily = hydrated
+
+        zh_message = format_external(daily, fx, "zh")
+        en_message = format_external(daily, fx, "en")
+        if zh_message is None and en_message is None:
+            logger.info("Nothing meaningful today — no external update sent")
+            ok = True
+        else:
+            ok = send_telegram(zh_message) if zh_message else True
+            time.sleep(2)
+            ok = (send_telegram(en_message) if en_message else True) and ok
 
     logger.info("Task completed (mode: %s)", BOT_MODE)
     return ok
