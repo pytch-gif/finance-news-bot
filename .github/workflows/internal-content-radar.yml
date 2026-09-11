@@ -2,8 +2,10 @@ name: PYTCH Content Radar
 
 on:
   schedule:
-    # Monday-Friday, 09:30 Singapore time = 01:30 UTC
-    - cron: '47 1 * * 1-5'
+    # Monday-Friday, ~09:52 Singapore time = 01:52 UTC.
+    # Off a round number on purpose: GitHub Actions scheduled runs queue worst
+    # at the top of the hour, which was causing multi-hour send delays.
+    - cron: '52 1 * * 1-5'
   workflow_dispatch:
 
 jobs:
