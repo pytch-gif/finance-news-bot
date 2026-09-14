@@ -25,7 +25,7 @@ WEEKDAY = NOW.weekday()
 # ── FIX 1: Read BOT_MODE so internal and external can behave differently ──────
 BOT_MODE = os.getenv("BOT_MODE", "external")   # "internal" or "external"
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "30"))
 # Internal has no editorial cap (see generate_internal_prompt) — this is only a
 # safety valve against a malformed/runaway model response, not a target count.
@@ -34,6 +34,9 @@ EXTERNAL_MAX_STORIES = int(os.getenv("EXTERNAL_MAX_STORIES", "3"))
 MIN_RELEVANCE_SCORE = int(os.getenv("MIN_RELEVANCE_SCORE", "5"))
 MAX_ARTICLE_AGE_HOURS = int(os.getenv("MAX_ARTICLE_AGE_HOURS", "36"))
 MONDAY_MAX_ARTICLE_AGE_HOURS = int(os.getenv("MONDAY_MAX_ARTICLE_AGE_HOURS", "72"))
+# The internal workflow runs at ~12am and ~9am SGT; the Friday weekly recap
+# should only send once, so it's gated to runs at/after this SGT hour.
+WEEKLY_RECAP_MIN_HOUR = int(os.getenv("WEEKLY_RECAP_MIN_HOUR", "6"))
 MAX_ARTICLES_PER_SOURCE = 5
 FX_MEANINGFUL_MOVE_PCT = float(os.getenv("FX_MEANINGFUL_MOVE_PCT", "0.5"))
 FX_EXAMPLE_MYR_AMOUNT = 5000
@@ -49,17 +52,17 @@ RSS_SOURCES = {
         "https://www.malaymail.com/feed/rss/money",
         "https://www.malaymail.com/feed/rss/malaysia",
         "https://www.bernama.com/en/rssfeed.php",
-        "https://www.thestar.com.my/rss/Business/Business-News/",
+        "https://www.thestar.com.my/rss/Business/Business-News/",  # TODO(dead): verified 404 Sep 2026 — thestar.com.my dropped RSS entirely (no autodiscovery link on homepage, all /rss/* paths 404). No replacement feed found; needs a WEB_SOURCES scraper if kept.
 
         # High-value official / primary sources
         # BNM moved to WEB_SOURCES (scraped from /pr) — /rss was never a real feed.
         "https://www.dosm.gov.my/",  # TODO(web-scrape): homepage has no server-rendered listing at all, needs a JS-capable fetch (not attempted — adds a headless-browser dependency)
         "https://www.mof.gov.my/",  # TODO(web-scrape): homepage has no server-rendered listing at all, needs research for a real newsroom subpage
-        "https://www.kwsp.gov.my/",  # TODO(web-scrape): no working RSS, currently yields 0 candidates
+        "https://www.kwsp.gov.my/",  # TODO(web-scrape): verified Sep 2026 — Cloudflare bot-challenge (403, cf-mitigated: challenge), not just a missing feed. Not scrapeable without a headless browser.
         "https://www.hasil.gov.my/feed/",  # real WordPress feed (site's homepage URL is NOT a feed)
 
         # Stronger business reporting
-        "https://theedgemalaysia.com/",
+        "https://theedgemalaysia.com/",  # TODO(dead): verified Sep 2026 — bare homepage, no RSS autodiscovery link, no /sitemap.xml. feeds.theedgemarkets.com (old domain) also 404s. Needs a WEB_SOURCES scraper if kept.
     ],
 
     # =========================================================
@@ -115,7 +118,7 @@ RSS_SOURCES = {
     "🏠 Property, rent & living costs": [
         # Malaysia
         "https://www.propertyguru.com.my/news-rss/guru-views",
-        "https://www.edgeprop.my/",
+        "https://www.edgeprop.my/",  # TODO(dead): verified Sep 2026 — the site's own "subscribe to RSS" page (edgeprop.my/content/subscribe-malaysia-rss) 307-redirects to /news with no feed content. No working RSS found.
 
         # Singapore primary data
         "https://www.ura.gov.sg/Corporate/Media-Room/Media-Releases",
@@ -125,14 +128,21 @@ RSS_SOURCES = {
     # PODCASTS / EXPERT COMMENTARY
     # =========================================================
     "🎙️ Expert commentary & content ideas": [
-        # Malaysia
-        "https://www.bfm.my/",  # TODO(web-scrape): no working RSS, currently yields 0 candidates
+        # Malaysia: bfm.my itself has no RSS (bare homepage, verified Sep 2026,
+        # dropped from this list) — BFM's "Ringgit & Sense" show is already
+        # covered below via its real Omny feed, confirmed against Apple
+        # Podcasts' own feedUrl for the show (id 430785286).
 
-        # Singapore
-        "https://omny.fm/shows/moneyfm-893/playlists/podcast",
+        # Singapore: omny.fm/shows/moneyfm-893/playlists/podcast is a webpage,
+        # not a feed (0 entries) — this is its real RSS feed, found by
+        # following the redirect from the site's own "podcast.rss" link.
+        # ?pageSize=20 is load-bearing: the unpaginated feed is the station's
+        # entire back-catalog (75MB, tens of thousands of entries, ~17s to
+        # download) since it's a 24/7 radio playlist, not a normal podcast.
+        "https://www.omnycontent.com/d/playlist/d9486183-3dd4-4ad6-aebe-a4c1008455d5/2894f3bc-c57f-4983-8afd-b321006effbf/91bdd19a-daf2-4cac-817e-b321006f0542/podcast.rss?pageSize=20",
 
-        # Existing Malaysian podcast
-        "https://www.omnycontent.com/d/playlist/de62ff84-6498-49d0-a266-a9d50120c712/1139cb70-e7fa-476c-9ccc-ab090040379e/acb27c03-f82a-4061-9a6c-ab09004037a3/podcast.rss",
+        # Existing Malaysian podcast (BFM's Ringgit & Sense)
+        "https://www.omnycontent.com/d/playlist/de62ff84-6498-49d0-a266-a9d50120c712/1139cb70-e7fa-476c-9ccc-ab090040379e/acb27c03-f82a-4061-9a6c-ab09004037a3/podcast.rss?pageSize=20",
     ],
 }
 
@@ -199,7 +209,7 @@ MALAYSIA_SOURCE_HOSTS = (
     "malaymail.com", "bernama.com", "thestar.com.my", "ringgitplus.com",
     "imoney.my", "ringgitohringgit.com", "propertyguru.com.my",
     "bnm.gov.my", "dosm.gov.my", "mof.gov.my", "kwsp.gov.my",
-    "hasil.gov.my", "theedgemalaysia.com", "edgeprop.my", "bfm.my",
+    "hasil.gov.my", "theedgemalaysia.com", "edgeprop.my",
     "mot.gov.my", "jpj.gov.my",
 )
 SINGAPORE_SOURCE_HOSTS = (
@@ -207,7 +217,6 @@ SINGAPORE_SOURCE_HOSTS = (
     "dollarsandsense.sg", "moneysmart.sg", "seedly.sg",
     "hrmasia.com", "mom.gov.sg", "iras.gov.sg", "mof.gov.sg",
     "singstat.gov.sg", "ica.gov.sg", "lta.gov.sg", "ura.gov.sg",
-    "omny.fm",
 )
 
 # Boss's source hierarchy: Tier 1 (official/primary) > Tier 2 (established media)
@@ -223,7 +232,7 @@ TIER2_HOSTS = (
     "thestar.com.my", "malaymail.com", "theedgemalaysia.com",
 )
 TIER3_HOSTS = (
-    "bfm.my", "omny.fm", "omnycontent.com", "moneysmart.sg", "seedly.sg",
+    "omnycontent.com", "moneysmart.sg", "seedly.sg",
     "dollarsandsense.sg", "ringgitplus.com", "imoney.my", "ringgitohringgit.com",
     "mothership.sg", "propertyguru.com.my", "edgeprop.my",
 )
@@ -420,9 +429,14 @@ def source_country_context(url):
         return "malaysia"
     if any(host == item or host.endswith("." + item) for item in SINGAPORE_SOURCE_HOSTS):
         return "singapore"
-    # This Omny playlist is BFM 89.9's Malaysian Ringgit & Sense programme.
+    # omnycontent.com is shared podcast-hosting infra for both a Malaysian and
+    # a Singaporean show, so the host alone can't tell them apart — key off
+    # each feed's playlist ID instead.
     if host == "omnycontent.com":
-        return "malaysia"
+        if "de62ff84-6498-49d0-a266-a9d50120c712" in url:  # BFM 89.9 Ringgit & Sense
+            return "malaysia"
+        if "d9486183-3dd4-4ad6-aebe-a4c1008455d5" in url:  # MONEY FM 89.3
+            return "singapore"
     return None
 
 
@@ -636,22 +650,21 @@ def should_show_fx(fx):
     return abs(fx["pct_move"]) >= FX_MEANINGFUL_MOVE_PCT or WEEKDAY == 0
 
 
-def call_groq(prompt, max_tokens=3500, retries=3):
-    api_key = os.getenv("GROQ_API_KEY")
+def call_openai(prompt, max_tokens=3500, retries=3):
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        logger.error("Missing GROQ_API_KEY")
+        logger.error("Missing OPENAI_API_KEY")
         return None
     for attempt in range(1, retries + 1):
         try:
             response = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
+                "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
                 json={
-                    "model": GROQ_MODEL,
+                    "model": OPENAI_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.35,
-                    "max_completion_tokens": max_tokens,
-                    "reasoning_effort": "low",
+                    "max_tokens": max_tokens,
                     "response_format": {"type": "json_object"},
                 },
                 timeout=90,
@@ -662,7 +675,7 @@ def call_groq(prompt, max_tokens=3500, retries=3):
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
         except Exception as exc:
-            logger.error("Groq attempt %d failed: %s", attempt, exc)
+            logger.error("OpenAI attempt %d failed: %s", attempt, exc)
             if attempt < retries:
                 time.sleep(5 * attempt)
     return None
@@ -1076,7 +1089,7 @@ def main():
             ok = send_telegram(format_internal({"news": []}))
         else:
             daily = hydrate_internal(
-                extract_json(call_groq(generate_internal_prompt(raw_news))),
+                extract_json(call_openai(generate_internal_prompt(raw_news))),
                 raw_news,
             )
             if daily is None:
@@ -1084,9 +1097,11 @@ def main():
                 return False
             ok = send_telegram(format_internal(daily))
 
-        # Friday weekly content radar (internal only)
-        if WEEKDAY == 4 and raw_news:
-            weekly = extract_json(call_groq(generate_weekly_prompt(raw_news), max_tokens=1800))
+        # Friday weekly content radar (internal only). The workflow now runs
+        # twice daily (~12am and ~9am SGT) — gate on hour so this only fires
+        # once, on the morning run, instead of twice every Friday.
+        if WEEKDAY == 4 and NOW.hour >= WEEKLY_RECAP_MIN_HOUR and raw_news:
+            weekly = extract_json(call_openai(generate_weekly_prompt(raw_news), max_tokens=1800))
             if weekly:
                 time.sleep(2)
                 ok = send_telegram(format_weekly(weekly)) and ok
@@ -1101,7 +1116,7 @@ def main():
         daily = {"posts": []}
         if raw_news:
             hydrated = hydrate_external(
-                extract_json(call_groq(generate_external_prompt(raw_news))),
+                extract_json(call_openai(generate_external_prompt(raw_news))),
                 raw_news,
             )
             if hydrated is None:
