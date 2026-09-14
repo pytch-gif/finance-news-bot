@@ -30,7 +30,7 @@ MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "30"))
 # Internal has no editorial cap (see generate_internal_prompt) — this is only a
 # safety valve against a malformed/runaway model response, not a target count.
 INTERNAL_SAFETY_CAP = int(os.getenv("INTERNAL_SAFETY_CAP", "20"))
-EXTERNAL_MAX_STORIES = int(os.getenv("EXTERNAL_MAX_STORIES", "3"))
+EXTERNAL_MAX_STORIES = int(os.getenv("EXTERNAL_MAX_STORIES", "6"))
 MIN_RELEVANCE_SCORE = int(os.getenv("MIN_RELEVANCE_SCORE", "5"))
 MAX_ARTICLE_AGE_HOURS = int(os.getenv("MAX_ARTICLE_AGE_HOURS", "36"))
 MONDAY_MAX_ARTICLE_AGE_HOURS = int(os.getenv("MONDAY_MAX_ARTICLE_AGE_HOURS", "72"))
