@@ -1,13 +1,7 @@
 name: PYTCH Content Radar
 
 on:
-  schedule:
-    # Every day, twice: ~12:52am and ~09:52am Singapore time (= 16:52 and 01:52 UTC).
-    # Off round numbers on purpose: GitHub Actions scheduled runs queue worst
-    # at the top of the hour, which was causing multi-hour send delays.
-    - cron: '52 16 * * *'
-    - cron: '52 1 * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # triggered externally by cron-job.org, not GitHub's schedule: — must fire at/after ~9am SGT so the Friday weekly recap gate (WEEKLY_RECAP_MIN_HOUR) still works
 
 jobs:
   content-radar:
