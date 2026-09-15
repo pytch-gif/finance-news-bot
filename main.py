@@ -102,7 +102,7 @@ RSS_SOURCES = {
     # =========================================================
     "💳 Personal finance": [
         # Singapore
-        "https://dollarsandsense.sg/feed/",
+        "https://dollarsandsense.sg/feed/",  # TODO(dead): verified Sep 2026 — now serves a JS-reload bot-challenge page (not RSS) to plain HTTP clients regardless of User-Agent, same as kwsp.gov.my. Not fetchable without a headless browser.
         "https://blog.moneysmart.sg/feed/",
         "https://blog.seedly.sg/feed/",
 
@@ -423,6 +423,17 @@ def relevance_score(title, summary, published_at=None, country_context=None, tie
     return score, list(dict.fromkeys(matched))[:6]
 
 
+def source_domain(url):
+    """Registered host, used to cap MAX_ARTICLES_PER_SOURCE per publisher.
+    Feed <title> tags are unreliable for this: some publishers give every
+    section feed the same generic title (merging genuinely distinct feeds
+    into one bucket), others give the same publisher different titles per
+    section (letting one publisher blow past the cap). The domain is stable
+    either way.
+    """
+    return urlsplit(url).netloc.lower().removeprefix("www.")
+
+
 def source_country_context(url):
     host = urlsplit(url).netloc.lower().removeprefix("www.")
     if any(host == item or host.endswith("." + item) for item in MALAYSIA_SOURCE_HOSTS):
@@ -486,7 +497,7 @@ def fetch_web(candidates, seen):
                 response = requests.get(url, headers=headers, timeout=25)
                 response.raise_for_status()
                 body = response.text
-                source_name = urlsplit(url).netloc.lower().removeprefix("www.")
+                source_name = source_domain(url)
                 tier = source_tier(url)
 
                 parsed_items = []
@@ -529,6 +540,7 @@ def fetch_web(candidates, seen):
                         "link": link,
                         "summary": "",
                         "source": source_name,
+                        "source_domain": source_name,
                         "tier": tier,
                         "score": score,
                         "matched": matched,
@@ -581,6 +593,7 @@ def fetch_rss():
                         "link": link,
                         "summary": summary,
                         "source": source,
+                        "source_domain": source_domain(url),
                         "tier": tier,
                         "score": score,
                         "matched": matched,
@@ -596,12 +609,12 @@ def fetch_rss():
     candidates.sort(key=lambda item: item["score"], reverse=True)
     selected, source_counts = [], {}
     for item in candidates:
-        count = source_counts.get(item["source"], 0)
+        count = source_counts.get(item["source_domain"], 0)
         if count >= MAX_ARTICLES_PER_SOURCE:
             continue
         item["id"] = len(selected) + 1
         selected.append(item)
-        source_counts[item["source"]] = count + 1
+        source_counts[item["source_domain"]] = count + 1
         if len(selected) >= MAX_CANDIDATES:
             break
     logger.info(
