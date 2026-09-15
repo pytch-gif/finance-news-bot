@@ -102,7 +102,7 @@ RSS_SOURCES = {
     # =========================================================
     "💳 Personal finance": [
         # Singapore
-        "https://dollarsandsense.sg/feed/",  # TODO(dead): verified Sep 2026 — now serves a JS-reload bot-challenge page (not RSS) to plain HTTP clients regardless of User-Agent, same as kwsp.gov.my. Not fetchable without a headless browser.
+        "https://dollarsandsense.sg/feed/",  # NOTE: observed intermittently serving a JS-reload bot-challenge page instead of RSS (Sep 2026) — not a permanent failure, fetch_rss's per-source try/except already handles it as a skipped run when it happens.
         "https://blog.moneysmart.sg/feed/",
         "https://blog.seedly.sg/feed/",
 
@@ -608,15 +608,39 @@ def fetch_rss():
 
     candidates.sort(key=lambda item: item["score"], reverse=True)
     selected, source_counts = [], {}
-    for item in candidates:
+
+    def take(item):
         count = source_counts.get(item["source_domain"], 0)
         if count >= MAX_ARTICLES_PER_SOURCE:
-            continue
+            return False
         item["id"] = len(selected) + 1
         selected.append(item)
         source_counts[item["source_domain"]] = count + 1
+        return True
+
+    # Pass 1: guarantee every section with at least one qualifying candidate
+    # gets its single best story seated first. Without this, a section whose
+    # sources are simply more keyword-dense or more reliably-fetching (e.g.
+    # personal-finance blogs vs. a slow government newsroom) can crowd out
+    # every other section on raw score alone, even when those sections have
+    # real, relevant stories of their own.
+    seeded_sections = set()
+    for item in candidates:
         if len(selected) >= MAX_CANDIDATES:
             break
+        if item["section"] in seeded_sections:
+            continue
+        if take(item):
+            seeded_sections.add(item["section"])
+
+    # Pass 2: fill remaining capacity by score, same per-domain cap as before.
+    seated = {id(item) for item in selected}
+    for item in candidates:
+        if len(selected) >= MAX_CANDIDATES:
+            break
+        if id(item) in seated:
+            continue
+        take(item)
     logger.info(
         "Kept %d relevant stories; rejected %d stale and %d undated entries (freshness limit: %dh)",
         len(selected), stale_count, undated_count, freshness_limit_hours(),
